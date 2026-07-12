@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Hikvision Local Service — Playback</title>
+<script src="/static/vendor/hls.min.js"></script>
+<style>
+  body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  h1 { font-size: 18px; font-weight: 600; }
+  a.nav { color: #93c5fd; font-size: 13px; }
+  .controls { display: flex; gap: 8px; align-items: center; margin: 16px 0; flex-wrap: wrap; }
+  select, input, button { background: #1c1c1c; color: #eee; border: 1px solid #333; border-radius: 4px; padding: 6px 10px; font-size: 13px; }
+  button { cursor: pointer; }
+  button:hover { background: #2a2a2a; }
+  .layout { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .segments { flex: 0 0 320px; max-height: 480px; overflow-y: auto; border: 1px solid #333; border-radius: 6px; }
+  .segment { padding: 8px 10px; border-bottom: 1px solid #262626; font-size: 13px; cursor: pointer; }
+  .segment:hover { background: #1c1c1c; }
+  .segment.active { background: #1e3a5f; }
+  .player { flex: 1 1 480px; background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
+  .player video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
+  .player .bar { padding: 8px 10px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; }
+  .empty { padding: 12px; color: #888; font-size: 13px; }
+</style>
+</head>
+<body>
+<a class="nav" href="/static/index.html">&larr; Live View</a>
+<h1>Playback</h1>
+
+<div class="controls">
+  <select id="channel"></select>
+  <input type="date" id="date">
+  <button id="searchBtn">Cari rekaman</button>
+</div>
+
+<div class="layout">
+  <div class="segments" id="segments"><div class="empty">Pilih channel &amp; tanggal, lalu klik "Cari rekaman".</div></div>
+  <div class="player">
+    <video id="video" muted controls playsinline></video>
+    <div class="bar"><span id="playerLabel">tidak ada yang diputar</span><button id="stopBtn" style="display:none">Stop</button></div>
+  </div>
+</div>
+
+<script>
+let hls = null;
+let currentPlaybackName = null;
+let channels = [];
+
+async function loadChannels() {
+  const res = await fetch('/api/channels');
+  channels = (await res.json()).filter(c => c.enabled);
+  const sel = document.getElementById('channel');
+  sel.innerHTML = channels.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+}
+
+function fmtTime(iso) {
+  return new Date(iso).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+async function search() {
+  const channelId = document.getElementById('channel').value;
+  const date = document.getElementById('date').value;
+  if (!date) { alert('Pilih tanggal dulu'); return; }
+
+  const start = new Date(`${date}T00:00:00`).toISOString();
+  const end = new Date(`${date}T23:59:59`).toISOString();
+
+  const container = document.getElementById('segments');
+  container.innerHTML = '<div class="empty">Mencari…</div>';
+
+  const res = await fetch(`/api/recordings?channelId=${channelId}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+  const data = await res.json();
+
+  if (data.segments.length === 0) {
+    container.innerHTML = '<div class="empty">Tidak ada rekaman di rentang ini.</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  for (const seg of data.segments) {
+    const el = document.createElement('div');
+    el.className = 'segment';
+    el.textContent = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
+    el.onclick = () => play(channelId, seg, el);
+    container.appendChild(el);
+  }
+}
+
+async function stopCurrent() {
+  if (currentPlaybackName) {
+    await fetch('/api/playback/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: currentPlaybackName }),
+    });
+    currentPlaybackName = null;
+  }
+  if (hls) { hls.destroy(); hls = null; }
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('playerLabel').textContent = 'tidak ada yang diputar';
+}
+
+async function play(channelId, seg, el) {
+  await stopCurrent();
+  document.querySelectorAll('.segment.active').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('playerLabel').textContent = 'memuat…';
+
+  const res = await fetch('/api/playback/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channelId: Number(channelId), startTime: seg.startTime, endTime: seg.endTime }),
+  });
+  if (!res.ok) {
+    document.getElementById('playerLabel').textContent = 'gagal memulai playback';
+    return;
+  }
+  const { name, hlsPath, hlsPort } = await res.json();
+  currentPlaybackName = name;
+
+  const video = document.getElementById('video');
+  const url = `http://${location.hostname}:${hlsPort}${hlsPath}`;
+  hls = new Hls({ lowLatencyMode: false });
+  hls.loadSource(url);
+  hls.attachMedia(video);
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    video.play();
+    document.getElementById('playerLabel').textContent = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
+    document.getElementById('stopBtn').style.display = 'inline-block';
+  });
+}
+
+document.getElementById('searchBtn').onclick = search;
+document.getElementById('stopBtn').onclick = stopCurrent;
+document.getElementById('date').valueAsDate = new Date();
+
+loadChannels();
+</script>
+</body>
+</html>
