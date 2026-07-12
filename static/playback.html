@@ -37,13 +37,22 @@
   <div class="segments" id="segments"><div class="empty">Pilih channel &amp; tanggal, lalu klik "Cari rekaman".</div></div>
   <div class="player">
     <video id="video" muted controls playsinline></video>
-    <div class="bar"><span id="playerLabel">tidak ada yang diputar</span><button id="stopBtn" style="display:none">Stop</button></div>
+    <div class="bar">
+      <span id="playerLabel">tidak ada yang diputar</span>
+      <span id="downloadControls" style="display:none">
+        <input type="number" id="downloadSeconds" value="30" min="1" max="300" style="width:60px" title="durasi (detik)"> detik
+        <button id="downloadBtn">Download ⬇</button>
+        <button id="stopBtn">Stop</button>
+      </span>
+    </div>
   </div>
 </div>
 
 <script>
 let hls = null;
 let currentPlaybackName = null;
+let currentChannelId = null;
+let currentSeg = null;
 let channels = [];
 
 async function loadChannels() {
@@ -105,8 +114,10 @@ async function stopCurrent() {
     currentPlaybackName = null;
   }
   if (hls) { hls.destroy(); hls = null; }
-  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('downloadControls').style.display = 'none';
   document.getElementById('playerLabel').textContent = 'tidak ada yang diputar';
+  currentChannelId = null;
+  currentSeg = null;
 }
 
 async function play(channelId, seg, el) {
@@ -114,6 +125,8 @@ async function play(channelId, seg, el) {
   document.querySelectorAll('.segment.active').forEach(e => e.classList.remove('active'));
   el.classList.add('active');
   document.getElementById('playerLabel').textContent = 'memuat…';
+  currentChannelId = channelId;
+  currentSeg = seg;
 
   const res = await fetch('/api/playback/start', {
     method: 'POST',
@@ -135,12 +148,51 @@ async function play(channelId, seg, el) {
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
     video.play();
     document.getElementById('playerLabel').textContent = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
-    document.getElementById('stopBtn').style.display = 'inline-block';
+    document.getElementById('downloadControls').style.display = 'inline-flex';
   });
+}
+
+async function downloadClip() {
+  if (!currentSeg || currentChannelId == null) return;
+  const seconds = Math.max(1, Math.min(300, Number(document.getElementById('downloadSeconds').value) || 30));
+  // Pure duration arithmetic on the DVR's timestamp digits (Date parses the
+  // "Z" string and toISOString() emits it back the same way) — NOT the same
+  // as the toLocaleTimeString() display conversion that caused the earlier
+  // timezone bug, since no browser-local timezone is applied here.
+  const startTime = currentSeg.startTime;
+  const endTime = new Date(new Date(startTime).getTime() + seconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  const btn = document.getElementById('downloadBtn');
+  const originalText = btn.textContent;
+  btn.textContent = 'Menyiapkan…';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId: Number(currentChannelId), startTime, endTime }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Download gagal: ${err.detail || res.statusText}`);
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ch${currentChannelId}_${startTime.replace(/[:T]/g, '-').replace('Z','')}.mp4`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } finally {
+    btn.textContent = originalText;
+    btn.disabled = false;
+  }
 }
 
 document.getElementById('searchBtn').onclick = search;
 document.getElementById('stopBtn').onclick = stopCurrent;
+document.getElementById('downloadBtn').onclick = downloadClip;
 document.getElementById('date').valueAsDate = new Date();
 
 loadChannels();

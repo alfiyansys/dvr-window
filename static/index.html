@@ -21,9 +21,10 @@
   .overlay.open { display: flex; }
   .overlay-box { max-width: 1280px; width: 100%; background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
   .overlay-box video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
-  .overlay-box .label { padding: 8px 12px; font-size: 14px; color: #ddd; display: flex; justify-content: space-between; align-items: center; }
-  .overlay-box .close { cursor: pointer; color: #aaa; font-size: 14px; background: #1c1c1c; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; }
-  .overlay-box .close:hover { background: #2a2a2a; color: #eee; }
+  .overlay-box .label { padding: 8px 12px; font-size: 14px; color: #ddd; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .overlay-box .label .actions { display: flex; gap: 8px; }
+  .overlay-box button { cursor: pointer; color: #aaa; font-size: 14px; background: #1c1c1c; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; }
+  .overlay-box button:hover { background: #2a2a2a; color: #eee; }
 </style>
 </head>
 <body>
@@ -34,20 +35,37 @@
 <div id="overlay" class="overlay">
   <div class="overlay-box">
     <div id="overlaySlot"></div>
-    <div class="label"><span id="overlayName"></span><button class="close" id="overlayClose">Tutup ✕</button></div>
+    <div class="label">
+      <span id="overlayName"></span>
+      <div class="actions">
+        <button id="overlaySnapshot">Snapshot 📷</button>
+        <button id="overlayClose">Tutup ✕</button>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
-function openOverlay(cell, name) {
+let overlayChannelId = null;
+
+function openOverlay(cell, name, channelId) {
   const slot = document.getElementById('overlaySlot');
   const video = cell.querySelector('video');
   cell.dataset.videoHome = '1';
   video._homeCell = cell;
   slot.appendChild(video);
   document.getElementById('overlayName').textContent = name;
+  overlayChannelId = channelId;
   document.getElementById('overlay').classList.add('open');
 }
+
+document.getElementById('overlaySnapshot').onclick = () => {
+  if (overlayChannelId == null) return;
+  const a = document.createElement('a');
+  a.href = `/api/snapshot?channelId=${overlayChannelId}`;
+  a.download = `snapshot_ch${overlayChannelId}_${Date.now()}.jpg`;
+  a.click();
+};
 
 function closeOverlay() {
   const slot = document.getElementById('overlaySlot');
@@ -82,7 +100,7 @@ async function main() {
       <div class="label"><span>${ch.name}</span><span class="status loading">connecting…</span></div>
     `;
     grid.appendChild(cell);
-    cell.onclick = () => openOverlay(cell, ch.name);
+    cell.onclick = () => openOverlay(cell, ch.name, ch.id);
 
     const video = cell.querySelector('video');
     const status = cell.querySelector('.status');
