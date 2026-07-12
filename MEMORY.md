@@ -63,15 +63,14 @@ backend exists, not in any tracked file or commit message.
       (`config.yaml` for non-secrets, `HIKVISION_PASSWORD` env var for
       the credential via `.env`, see `.env.example`). `/api/channels`
       and `/api/device` verified end-to-end against the real device.
-- [~] Phase 2 — live view: mediamtx sidecar (`app/mediabridge.py`) bridges
-      RTSP → HLS/WebRTC, static grid UI at `/static/index.html` verified
-      live in Chrome for channel 1 (H.264). Channels 2-4 (H.265) don't
-      play in Chrome (no HEVC-via-MSE support in Chromium) — fix is to
-      switch those channels' codec to H.264 on the DVR itself, but the
-      `<redacted-username>` account lacks privilege for that ISAPI config
-      change (`403 lowPrivilege`). User will change it manually via the
-      DVR menu; re-verify in browser once done (see `PLAN.md` Phase 2
-      findings for details).
+- [x] Phase 2 — live view: mediamtx sidecar (`app/mediabridge.py`) bridges
+      RTSP → HLS/WebRTC, static grid UI at `/static/index.html`. All 4
+      active channels (Teras, Car Port, Garasi, Ruang Tamu) verified
+      live in Chrome after user switched channels 2-4 from H.265 to
+      H.264 on the DVR (Chromium has no HEVC-via-MSE support — see
+      `PLAN.md` Phase 2 findings). Channel encoding on the DVR is now:
+      **all 4 active channels' main streams are H.264** (sub-streams may
+      still be H.265, not yet checked/used by the UI).
 
 ## Known account limitation
 
