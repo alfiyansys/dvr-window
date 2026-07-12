@@ -90,6 +90,12 @@ Device: <redacted-dvr-host>, ISAPI reachable, digest auth confirmed working with
 
 Phase 0 is a short, hands-on step against the physical unit (`curl`/Postman-style checks) before writing real backend code, so later phases build on confirmed facts instead of assumptions from datasheets.
 
+## Phase 2 findings (live view, in progress)
+
+- **mediamtx bridge works end-to-end**: backend spawns mediamtx as a child process (`app/mediabridge.py`), generates its config from the live channel list (RTSP source per stream, `sourceOnDemand: true` so the DVR isn't connected to until a client actually watches), exposes HLS (`:8888`) and WebRTC (`:8889`). Verified live in an actual Chrome browser via the static grid UI (`static/index.html`, `/api/streams`) — channel 1 (H.264) renders live video successfully.
+- **Browser HEVC/H.265 playback doesn't work in Chrome**: channels 2-4 (Car Port, Garasi, Ruang Tamu) fail to play — confirmed root cause is the browser, not our pipeline: `MediaSource.isTypeSupported('video/mp4; codecs=hvc1...')` returns `false` in Chrome/Chromium on this Linux box (HEVC decode isn't available via MSE — a licensing limitation of Chromium, not a bug in mediamtx or our code; mediamtx correctly serves the HEVC HLS stream, confirmed earlier via `ffprobe`).
+- **Fix decided**: change channels 2-4's live/recording codec from H.265 to H.264 via ISAPI (`PUT /ISAPI/Streaming/channels/<id>`, confirmed H.264 is an available option via `/ISAPI/Streaming/channels/<id>/capabilities`). **Blocked**: the `<redacted-username>` account got `403 lowPrivilege` / `subStatusCode: lowPrivilege` on the PUT — this account is read/live-view-only, not authorized for remote config changes. User will change the codec manually via the DVR's own on-screen menu (Configuration → Video/Audio) instead. **Follow-up**: once changed, re-verify channels 2-4 render in the browser (repeat the same `/static/index.html` check), and re-run the Phase 0 streaming-channel query to refresh the recorded codec facts in this doc.
+
 ## Milestones
 
 **Phase 0 — Device recon** (no app code)

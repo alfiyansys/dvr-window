@@ -63,7 +63,24 @@ backend exists, not in any tracked file or commit message.
       (`config.yaml` for non-secrets, `HIKVISION_PASSWORD` env var for
       the credential via `.env`, see `.env.example`). `/api/channels`
       and `/api/device` verified end-to-end against the real device.
-- [ ] Phase 2 — live view (media bridge + browser grid) — not started.
+- [~] Phase 2 — live view: mediamtx sidecar (`app/mediabridge.py`) bridges
+      RTSP → HLS/WebRTC, static grid UI at `/static/index.html` verified
+      live in Chrome for channel 1 (H.264). Channels 2-4 (H.265) don't
+      play in Chrome (no HEVC-via-MSE support in Chromium) — fix is to
+      switch those channels' codec to H.264 on the DVR itself, but the
+      `<redacted-username>` account lacks privilege for that ISAPI config
+      change (`403 lowPrivilege`). User will change it manually via the
+      DVR menu; re-verify in browser once done (see `PLAN.md` Phase 2
+      findings for details).
+
+## Known account limitation
+
+`<redacted-username>` is a **read/live-view-only** account — confirmed it can
+GET device info, channels, PTZ caps, and CMSearch, but a `PUT` to change
+streaming channel config (e.g. codec) returns `403 lowPrivilege`. Any
+future feature needing remote config changes (not just reading) will
+hit this same wall — either request elevated privilege for this account
+or get a separate admin credential for those specific calls.
 
 ## Running the backend
 
