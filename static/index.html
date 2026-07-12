@@ -8,13 +8,22 @@
   body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
   h1 { font-size: 18px; font-weight: 600; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
-  .cell { background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
-  .cell video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
+  .cell { background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; cursor: pointer; }
+  .cell:hover { border-color: #666; }
+  .cell video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; pointer-events: none; }
   .cell .label { padding: 6px 10px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; }
   .cell .status { font-size: 11px; }
   .status.ok { color: #4ade80; }
   .status.err { color: #f87171; }
   .status.loading { color: #fbbf24; }
+
+  .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 10; align-items: center; justify-content: center; padding: 32px; }
+  .overlay.open { display: flex; }
+  .overlay-box { max-width: 1280px; width: 100%; background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
+  .overlay-box video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
+  .overlay-box .label { padding: 8px 12px; font-size: 14px; color: #ddd; display: flex; justify-content: space-between; align-items: center; }
+  .overlay-box .close { cursor: pointer; color: #aaa; font-size: 14px; background: #1c1c1c; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; }
+  .overlay-box .close:hover { background: #2a2a2a; color: #eee; }
 </style>
 </head>
 <body>
@@ -22,7 +31,41 @@
 <a href="/static/playback.html" style="color:#93c5fd;font-size:13px;">Playback &rarr;</a>
 <div id="grid" class="grid"></div>
 
+<div id="overlay" class="overlay">
+  <div class="overlay-box">
+    <div id="overlaySlot"></div>
+    <div class="label"><span id="overlayName"></span><button class="close" id="overlayClose">Tutup ✕</button></div>
+  </div>
+</div>
+
 <script>
+function openOverlay(cell, name) {
+  const slot = document.getElementById('overlaySlot');
+  const video = cell.querySelector('video');
+  cell.dataset.videoHome = '1';
+  video._homeCell = cell;
+  slot.appendChild(video);
+  document.getElementById('overlayName').textContent = name;
+  document.getElementById('overlay').classList.add('open');
+}
+
+function closeOverlay() {
+  const slot = document.getElementById('overlaySlot');
+  const video = slot.querySelector('video');
+  if (video && video._homeCell) {
+    video._homeCell.insertBefore(video, video._homeCell.firstChild);
+  }
+  document.getElementById('overlay').classList.remove('open');
+}
+
+document.getElementById('overlayClose').onclick = closeOverlay;
+document.getElementById('overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'overlay') closeOverlay();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeOverlay();
+});
+
 async function main() {
   const res = await fetch('/api/streams');
   const data = await res.json();
@@ -39,6 +82,7 @@ async function main() {
       <div class="label"><span>${ch.name}</span><span class="status loading">connecting…</span></div>
     `;
     grid.appendChild(cell);
+    cell.onclick = () => openOverlay(cell, ch.name);
 
     const video = cell.querySelector('video');
     const status = cell.querySelector('.status');
