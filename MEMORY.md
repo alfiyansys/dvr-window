@@ -29,10 +29,9 @@ in a local, gitignored `.env` (`HIKVISION_PASSWORD=...`, see `.env.example`).
 
 ## Progress
 
-- [x] Phase 0 (device recon), 1 (backend core), 2 (live view), 4 (playback & search) — see `PLAN.md` Milestones table for details.
+- [x] Phase 0 (device recon), 1 (backend core), 2 (live view), 4 (playback & search), 5 (snapshot & download) — see `PLAN.md` Milestones table for details.
 - [~] Phase 3 (PTZ) — skipped, no hardware to support it.
-- [ ] Phase 5 (snapshot & download) — next up.
-- [ ] Phase 6 (packaging).
+- [ ] Phase 6 (packaging) — next up.
 - [ ] Re-verify channels 9/10 once back online.
 
 ## Before touching ISAPI timestamps or playback

@@ -21,8 +21,8 @@ Rationale in `ARCHITECTURE.md`.
 | 2 | ✅ done | Live view — mediamtx bridge, `/api/streams`, live grid UI |
 | 3 | ⬜ skipped | PTZ — no PTZ hardware attached to any active channel; revisit only if that changes |
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
-| 5 | ⬜ next | Snapshot & download |
-| 6 | ⬜ not started | Polish/packaging — systemd service, playback-path GC, event/alarm stream, basic auth on the local UI |
+| 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
+| 6 | ⬜ next | Polish/packaging — systemd service, playback-path GC, event/alarm stream, basic auth on the local UI |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -38,6 +38,6 @@ duplicated here — this file tracks *what's done and what's next*, not
 
 ## Next step
 
-Phase 5 — snapshot (`/ISAPI/Streaming/channels/<ID>/picture`) and
-download-by-time-range (ISAPI content-mgmt download, proxied through
-the backend so the browser can save-to-disk).
+Phase 6 — packaging: systemd service + install script, playback-path
+garbage collection (see `ARCHITECTURE.md` known gaps), event/alarm
+stream, basic auth on the local UI.

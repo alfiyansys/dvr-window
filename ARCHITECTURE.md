@@ -81,6 +81,22 @@ of writing our own RTSP-to-browser transcoder.
   can return `403 lowPrivilege` depending on the account — read-only
   accounts can't make config changes. See `MEMORY.md` for which account
   this project currently uses and its privilege level.
+- Snapshot: `GET /ISAPI/Streaming/channels/<streamID>/picture` returns
+  a JPEG directly — no wrapping, just proxy the bytes.
+- `CMSearch` matches return a segment's **own full start/end** in their
+  `playbackURI`, not whatever time window was searched for — a search
+  scoped to a 20-second window still returned a segment spanning 27
+  minutes, with `starttime` at the segment's own beginning. Fine for
+  "play this whole segment" (Phase 4), but for a precise clip (Phase 5
+  download) the match's `name`/`size` tokens must be kept (they
+  identify which stored file to read) while `starttime`/`endtime` are
+  overwritten with what was actually requested.
+- `ContentMgmt/download` (`POST /ISAPI/ContentMgmt/download`, tried
+  during Phase 5) **ignores `starttime`/`endtime` entirely** and
+  streams the whole segment file (~1GB for a ~1.5 hour segment on this
+  DVR) — not usable for "download a clip." Downloads are built on RTSP
+  playback instead (see Media bridge design below), which does respect
+  a custom `starttime`.
 
 ## RTSP reference
 
@@ -112,9 +128,55 @@ DVR credentials in RTSP source URLs — must never be committed).
 - **Output**: HLS on `:8888`, WebRTC on `:8889`. Frontend currently
   uses HLS via hls.js (works cross-browser without WebRTC signaling
   complexity); WebRTC paths are exposed by the API but not yet used.
+- **RTSP re-serve** (`127.0.0.1:8554`, loopback-only) exists purely so
+  the backend can capture download clips with ffmpeg — see "Clip
+  download design" below. Not for LAN/browser use.
 - Known gap: no TTL/GC for playback paths if a client abandons playback
   without calling stop (e.g. tab closed). Fine for single-user local
   use; revisit before packaging (Phase 6).
+
+## Clip download design
+
+`/api/download` doesn't use `ContentMgmt/download` (see ISAPI
+reference above — it ignores the requested time range) or the DVR's
+playback RTSP `endtime` (found unreliable, see below). Instead:
+
+1. Fresh, nudged `CMSearch` to get a valid `name`/`size` token for the
+   segment covering the requested window (same staleness/boundary
+   handling as playback).
+2. Rewrite that match's `playbackURI` (`_rewrite_playback_window` in
+   `app/main.py`) to use the **caller's own** `starttime`, keeping the
+   fresh `name`/`size`.
+3. Register that as a dynamic mediamtx path (same mechanism as
+   playback), then run `ffmpeg` against mediamtx's **RTSP re-serve**
+   (not its HLS output) with `-t <duration>` to enforce the exact
+   cutoff, `-c:v copy -an` (video-only, see below), writing an MP4.
+4. Return the file (`FileResponse` with a `BackgroundTask` that
+   deletes the temp file after it's sent), tear down the dynamic path.
+
+Two dead ends hit along the way, kept here so they aren't retried:
+
+- **Pulling directly from the DVR's playback RTSP with ffmpeg hung**
+  (connected fine, got valid SDP, then zero packets until timeout) —
+  even though mediamtx's RTSP client pulled the *identical* source
+  URL without issue. Specific to how ffmpeg's RTSP client negotiates
+  with this DVR's playback endpoint; not investigated further since
+  routing through mediamtx works. So capture always goes DVR → mediamtx
+  → (RTSP re-serve) → ffmpeg, never DVR → ffmpeg directly.
+- **Capturing from mediamtx's HLS output** (instead of its RTSP
+  re-serve) hit segment-pruning 404s mid-capture — LL-HLS prunes old
+  segments faster than a capture can reliably keep up. RTSP re-serve
+  has no such windowing.
+- **Transcoding this DVR's G.711 audio to AAC for the mp4 container
+  reliably hung ffmpeg** (packets stopped flowing entirely, even
+  though video-only capture from the same source worked immediately).
+  Not root-caused; downloads are video-only for now. Most channels
+  here don't have audio enabled on their main stream anyway.
+- The DVR **doesn't reliably stop at the RTSP source's `endtime`**
+  once mediamtx is in the loop — a 30-second requested window kept
+  streaming for 39+ seconds until the client's own timeout killed it.
+  The real cutoff is enforced by ffmpeg's `-t`, not by trusting the
+  DVR/mediamtx to stop on their own.
 
 ## Known device quirks and bugs
 
