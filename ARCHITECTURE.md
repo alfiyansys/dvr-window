@@ -21,33 +21,35 @@ installer at hand.
 
 ## Components
 
-```mermaid
-flowchart TB
-    Browser["Browser (localhost:PORT)<br/>live grid · playback timeline · download"]
+Two separate paths — control-plane (ISAPI, via the backend) and
+media-plane (RTSP, via the media bridge, not proxied through the
+backend at all):
 
-    subgraph Backend["Backend service (Python / FastAPI, app/)"]
-        WebServer["Local web server<br/>REST API + static frontend"]
-        ISAPIClient["ISAPI client<br/>(app/isapi.py)"]
-    end
+```
+CONTROL PLANE (channels, search, snapshot, download)
+-----------------------------------------------------
 
-    DVR_HTTP["DVR :80 — ISAPI<br/>channels · search · snapshot · download"]
+  Browser  -- HTTP request -->  Backend (FastAPI)  -- HTTP digest -->  DVR :80 (ISAPI)
+  Browser  <-- JSON response --  app/main.py            <-- XML --    DVR :80 (ISAPI)
+                                 app/isapi.py (client)
 
-    Bridge["Media bridge: mediamtx<br/>sidecar process (app/mediabridge.py)"]
-    DVR_RTSP["DVR :554 — RTSP<br/>live + playback streams"]
 
-    Browser <-->|HTTP| WebServer
-    WebServer --> ISAPIClient
-    ISAPIClient <-->|HTTP digest| DVR_HTTP
-    DVR_RTSP <-->|RTSP| Bridge
-    Bridge -->|HLS / WebRTC| Browser
+MEDIA PLANE (live view + playback)
+-----------------------------------------------------
+
+  DVR :554 (RTSP)  -- RTSP -->  Media bridge: mediamtx  -- HLS / WebRTC -->  Browser <video>
+                                app/mediabridge.py
+                                (sidecar process)
 ```
 
-Browsers can't play raw RTSP/H.264 elementary streams directly, so the
-media bridge is a separate path from the ISAPI control-plane calls —
-`<video>` in the browser talks to mediamtx directly (not proxied
-through the FastAPI backend). Using **mediamtx** (single Go binary,
-RTSP-in / HLS+WebRTC-out, has a runtime control API for dynamic paths)
-instead of writing our own RTSP-to-browser transcoder.
+`<video>` in the browser talks to mediamtx directly on its own ports
+(`:8888` HLS, `:8889` WebRTC) — the FastAPI backend only tells the
+browser *which* mediamtx path to use (via `/api/streams` and
+`/api/playback/start`), it doesn't proxy the media itself. Browsers
+can't play raw RTSP/H.264 elementary streams directly, so this bridge
+is required; using **mediamtx** (single Go binary, RTSP-in /
+HLS+WebRTC-out, has a runtime control API for dynamic paths) instead
+of writing our own RTSP-to-browser transcoder.
 
 - **Backend** (`app/`): config loading (`config.py`), ISAPI client
   (`isapi.py`), mediamtx process + dynamic path management
