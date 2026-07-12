@@ -14,6 +14,7 @@ RUNTIME_CONFIG_PATH = MEDIAMTX_DIR / "runtime.yml"
 HLS_PORT = 8888
 WEBRTC_PORT = 8889
 API_PORT = 9997
+RTSP_PORT = 8554
 
 
 def stream_path_name(channel_id: int, stream_id: str) -> str:
@@ -47,7 +48,13 @@ class MediaBridge:
 
         config = {
             "logLevel": "info",
-            "rtsp": False,
+            # RTSP re-serve is loopback-only and exists purely so the
+            # backend can capture download clips with ffmpeg without
+            # HLS's segment-pruning getting in the way (see
+            # ARCHITECTURE.md) — not meant for LAN/browser access.
+            "rtsp": True,
+            "rtspAddress": f"127.0.0.1:{RTSP_PORT}",
+            "rtspTransports": ["tcp"],
             "rtmp": False,
             "srt": False,
             "moq": False,
@@ -93,6 +100,30 @@ class MediaBridge:
 
     def remove_playback_path(self, name: str) -> None:
         httpx.delete(f"http://127.0.0.1:{API_PORT}/v3/config/paths/delete/{name}", timeout=5.0)
+
+    def capture_clip(self, name: str, duration_seconds: float, output_path: Path) -> None:
+        """Capture `duration_seconds` of video from a playback path into an
+        MP4 file.
+
+        The DVR doesn't reliably stop at the RTSP source's `endtime` (found
+        during Phase 5 testing — playback kept going well past a requested
+        30-second window), so the cutoff is enforced here with ffmpeg's
+        `-t` instead. Video-only: transcoding this DVR's G.711 audio to
+        AAC for the mp4 container reliably hung ffmpeg (packets stopped
+        flowing entirely) — dropping audio was the reliable fix, and most
+        channels here don't have it enabled on their main stream anyway.
+        """
+        cmd = [
+            "ffmpeg", "-y", "-v", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", f"rtsp://127.0.0.1:{RTSP_PORT}/{name}",
+            "-t", str(duration_seconds),
+            "-c:v", "copy", "-an",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, timeout=duration_seconds + 20, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg capture failed: {result.stderr.decode(errors='replace')}")
 
     def stream_paths(self, name: str) -> dict:
         """Path portion of the mediamtx URLs for this stream — the frontend
