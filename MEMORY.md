@@ -78,6 +78,23 @@ backend exists, not in any tracked file or commit message.
       recordings. Known gap: no auto-cleanup if a client abandons
       playback without calling stop — fine for now, revisit at Phase 6.
 
+## Important device quirk: ISAPI timestamps aren't real UTC
+
+The DVR's ISAPI/CMSearch timestamps carry a "Z" (UTC) suffix but are
+actually **its own local wall-clock digits (WIB, UTC+7), unconverted**.
+Confirmed by extracting an HLS playback frame and reading the DVR's
+own on-screen timestamp overlay against what was requested. Any code
+touching these timestamps must treat them as opaque local digits, not
+true UTC — never round-trip them through JS `Date`/`toISOString()` or
+Python timezone-aware datetime math, or you'll silently get a 7-hour
+(or browser-timezone-dependent) offset. See `PLAN.md` Phase 4 findings
+for the full story and the fix in `static/playback.html` / `app/main.py`.
+
+Also: CMSearch has a boundary bug — a search `startTime` that exactly
+equals a segment's start returns the *previous* segment instead.
+`/api/playback/start` works around it by nudging the search start 2
+seconds forward before re-searching.
+
 ## Known account limitation
 
 `<redacted-username>` is a **read/live-view-only** account — confirmed it can
