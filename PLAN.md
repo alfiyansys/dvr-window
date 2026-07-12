@@ -113,6 +113,13 @@ Continuous-move + stop + presets via ISAPI, joystick UI overlay, gated by per-ch
 **Phase 4 — Playback & search**
 ISAPI recording search (`CMSearch`), timeline/calendar UI, play a selected segment through mediamtx using RTSP playback URL with time range.
 
+**Phase 4 findings (done)**
+- CMSearch pagination confirmed working via same-searchID reuse (see Phase 0 findings); `ISAPIClient.search_recordings()` loops this automatically.
+- **Playback URIs go stale**: an hour-old `playbackURI` from an earlier CMSearch got a `400 Bad Request` from the DVR's RTSP server. Fix: `/api/playback/start` always re-searches (tightly scoped to the exact segment time range) immediately before handing the URI to mediamtx, rather than reusing a URI a user may have looked at minutes earlier.
+- **mediamtx's control API** (`127.0.0.1:9997`, enabled via `api: true` in the generated config) supports registering/deregistering paths at runtime — `POST /v3/config/paths/add/{name}` (JSON body: `source`, `sourceOnDemand`), `DELETE /v3/config/paths/delete/{name}`. This is how playback is bridged: one throwaway path per playback session, created on `/api/playback/start`, removed on `/api/playback/stop`. Verified the path is actually gone from `/v3/paths/list` after stop.
+- Verified end-to-end in Chrome against real DVR recordings (channel 1, night-vision footage with DVR's own timestamp overlay visible), including Stop correctly tearing down the mediamtx path.
+- Known gap (not yet handled): no TTL/garbage-collection for playback paths if a client starts playback and never calls stop (e.g. tab closed). Fine for single-user local use for now; worth revisiting before Phase 6 packaging.
+
 **Phase 5 — Snapshot & download**
 Snapshot endpoint (`/ISAPI/Streaming/channels/<ID>/picture`), download-by-time-range proxy, save-to-disk in browser.
 

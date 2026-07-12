@@ -72,6 +72,12 @@ backend exists, not in any tracked file or commit message.
       **all 4 active channels' main streams are H.264** (sub-streams may
       still be H.265, not yet checked/used by the UI).
 
+- [x] Phase 4 — playback & search: `/api/recordings` (CMSearch, paginated)
+      and `/api/playback/{start,stop}` (dynamic mediamtx paths via its
+      control API on `:9997`). Verified live in Chrome against real
+      recordings. Known gap: no auto-cleanup if a client abandons
+      playback without calling stop — fine for now, revisit at Phase 6.
+
 ## Known account limitation
 
 `<redacted-username>` is a **read/live-view-only** account — confirmed it can
