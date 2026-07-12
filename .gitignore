@@ -1,0 +1,8 @@
+.env
+.env.*
+config.local.yaml
+config.local.yml
+*.secrets.*
+__pycache__/
+*.pyc
+.venv/
