@@ -50,6 +50,11 @@ class ISAPIClient:
         data = self._get_xml("/ISAPI/Streaming/channels")
         return _as_list(data["StreamingChannelList"]["StreamingChannel"])
 
+    def get_snapshot(self, stream_id: int) -> bytes:
+        resp = self._client.get(f"/ISAPI/Streaming/channels/{stream_id}/picture")
+        resp.raise_for_status()
+        return resp.content
+
     def get_ptz_capabilities(self, channel_id: int) -> dict | None:
         try:
             data = self._get_xml(f"/ISAPI/PTZCtrl/channels/{channel_id}/capabilities")

@@ -1,16 +1,24 @@
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from app.config import load_settings
 from app.isapi import ISAPIClient
 from app.mediabridge import HLS_PORT, WEBRTC_PORT, MediaBridge, stream_path_name
 
 settings = load_settings()
+
+DOWNLOAD_DIR = Path(__file__).resolve().parent.parent / "tmp" / "downloads"
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+MAX_DOWNLOAD_SECONDS = 300
 
 
 @asynccontextmanager
@@ -105,6 +113,28 @@ def _main_track_id(channel_id: int) -> int:
     return channel_id * 100 + 1
 
 
+def _to_dvr_compact(iso: str) -> str:
+    """ISO "2026-07-12T14:05:00Z" -> DVR query-param form "20260712T140500Z"
+    — pure string reformatting of the same literal digits, no timezone math
+    (see the fake-UTC note in start_playback)."""
+    return datetime.fromisoformat(iso.rstrip("Z")).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _rewrite_playback_window(playback_uri: str, start_time: str, end_time: str) -> str:
+    """CMSearch matches return a segment's *own* full start/end in its
+    playbackURI, not the caller's requested window (confirmed during Phase
+    5: a search scoped to a 20s window still returned a segment spanning
+    27 minutes, with starttime at the segment's own beginning). For a
+    precise clip, keep the segment's name/size tokens (they identify which
+    stored file to read) but overwrite starttime/endtime with what was
+    actually requested."""
+    parts = urlsplit(playback_uri)
+    query = parse_qs(parts.query)
+    query["starttime"] = [_to_dvr_compact(start_time)]
+    query["endtime"] = [_to_dvr_compact(end_time)]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
+
+
 def _nudge_time(iso: str, seconds: int) -> str:
     """Add `seconds` to an ISAPI timestamp, treating it as a literal
     wall-clock value (no timezone math) — see the note in start_playback
@@ -168,6 +198,63 @@ def stop_playback(req: PlaybackStopRequest):
     bridge: MediaBridge = app.state.bridge
     bridge.remove_playback_path(req.name)
     return {"status": "stopped"}
+
+
+@app.get("/api/snapshot")
+def get_snapshot(channelId: int):
+    isapi: ISAPIClient = app.state.isapi
+    jpeg = isapi.get_snapshot(_main_track_id(channelId))
+    return Response(content=jpeg, media_type="image/jpeg")
+
+
+class DownloadRequest(BaseModel):
+    channelId: int
+    startTime: str
+    endTime: str
+
+
+@app.post("/api/download")
+def download_clip(req: DownloadRequest):
+    isapi: ISAPIClient = app.state.isapi
+    bridge: MediaBridge = app.state.bridge
+
+    start = datetime.fromisoformat(req.startTime.rstrip("Z"))
+    end = datetime.fromisoformat(req.endTime.rstrip("Z"))
+    duration = (end - start).total_seconds()
+    if duration <= 0:
+        raise HTTPException(status_code=400, detail="endTime must be after startTime")
+    if duration > MAX_DOWNLOAD_SECONDS:
+        raise HTTPException(status_code=400, detail=f"Range too long — max {MAX_DOWNLOAD_SECONDS}s per download")
+
+    # Same staleness/boundary caveats as playback (see start_playback) — a
+    # fresh, nudged-forward search keeps the name/size token valid.
+    track_id = _main_track_id(req.channelId)
+    search_start = _nudge_time(req.startTime, seconds=2)
+    matches = isapi.search_recordings(track_id, search_start, req.endTime, max_pages=1, page_size=1)
+    if not matches:
+        raise HTTPException(status_code=404, detail="No recording found for that time range")
+
+    precise_uri = _rewrite_playback_window(matches[0]["playbackURI"], req.startTime, req.endTime)
+    device = settings.device
+    source_url = precise_uri.replace(
+        "rtsp://", f"rtsp://{device.username}:{device.password}@", 1
+    )
+
+    name = f"dl_ch{req.channelId}_{uuid.uuid4().hex[:8]}"
+    bridge.add_playback_path(name, source_url)
+    try:
+        output_path = DOWNLOAD_DIR / f"{name}.mp4"
+        bridge.capture_clip(name, duration_seconds=duration, output_path=output_path)
+    finally:
+        bridge.remove_playback_path(name)
+
+    filename = f"ch{req.channelId}_{start.strftime('%Y%m%d_%H%M%S')}.mp4"
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        filename=filename,
+        background=BackgroundTask(output_path.unlink),
+    )
 
 
 @app.get("/api/device")

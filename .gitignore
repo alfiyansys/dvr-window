@@ -14,3 +14,4 @@ mediamtx/runtime.yml
 mediamtx/LICENSE
 mediamtx/auto.crt
 mediamtx/auto.key
+tmp/
