@@ -1,23 +1,36 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.config import load_settings
 from app.isapi import ISAPIClient
+from app.mediabridge import HLS_PORT, WEBRTC_PORT, MediaBridge, stream_path_name
 
 settings = load_settings()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.isapi = ISAPIClient(settings.device)
+    isapi = ISAPIClient(settings.device)
+    app.state.isapi = isapi
+
+    channels = [_build_channel(isapi, vi, isapi.get_streaming_channels()) for vi in isapi.get_video_input_channels()]
+    app.state.channels = channels
+
+    bridge = MediaBridge()
+    bridge.start(settings.device, channels)
+    app.state.bridge = bridge
+
     try:
         yield
     finally:
-        app.state.isapi.close()
+        bridge.stop()
+        isapi.close()
 
 
 app = FastAPI(title="hikvision-localservice", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 def _build_channel(isapi: ISAPIClient, video_input: dict, streaming_channels: list[dict]) -> dict:
@@ -61,6 +74,28 @@ def get_channels():
     video_inputs = isapi.get_video_input_channels()
     streaming_channels = isapi.get_streaming_channels()
     return [_build_channel(isapi, vi, streaming_channels) for vi in video_inputs]
+
+
+@app.get("/api/streams")
+def get_streams():
+    bridge: MediaBridge = app.state.bridge
+    channels = []
+    for channel in app.state.channels:
+        if not channel["enabled"]:
+            continue
+        streams = []
+        for stream in channel["streams"]:
+            name = stream_path_name(channel["id"], stream["streamId"])
+            kind = "main" if stream["streamId"].endswith("01") else "sub"
+            streams.append({
+                "kind": kind,
+                "streamId": stream["streamId"],
+                "hlsPath": bridge.stream_paths(name)["hlsPath"],
+                "webrtcPath": bridge.stream_paths(name)["webrtcPath"],
+            })
+        channels.append({"id": channel["id"], "name": channel["name"], "streams": streams})
+
+    return {"hlsPort": HLS_PORT, "webrtcPort": WEBRTC_PORT, "channels": channels}
 
 
 @app.get("/api/device")

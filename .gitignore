@@ -8,3 +8,9 @@ __pycache__/
 *.pyc
 .venv/
 .claude/
+mediamtx/mediamtx
+mediamtx/mediamtx.tar.gz
+mediamtx/runtime.yml
+mediamtx/LICENSE
+mediamtx/auto.crt
+mediamtx/auto.key
