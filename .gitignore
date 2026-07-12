@@ -1,8 +1,10 @@
 .env
 .env.*
+!.env.example
 config.local.yaml
 config.local.yml
 *.secrets.*
 __pycache__/
 *.pyc
 .venv/
+.claude/
