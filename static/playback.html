@@ -53,8 +53,17 @@ async function loadChannels() {
   sel.innerHTML = channels.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
 }
 
+// The DVR's ISAPI timestamps are labeled "Z" (UTC) but are actually its
+// own local wall-clock digits, unconverted (confirmed by extracting a
+// playback frame and reading the DVR's on-screen timestamp — it matched
+// the raw ISAPI digits exactly, not a UTC-shifted version of them). So
+// these strings must be read and written as literal digits, never through
+// `new Date(...)`/`toISOString()`/`toLocaleTimeString()`, which would
+// apply the browser's own timezone on top and produce the wrong time
+// whenever the browser isn't set to the DVR's zone (WIB).
 function fmtTime(iso) {
-  return new Date(iso).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const m = iso.match(/T(\d{2}):(\d{2}):(\d{2})/);
+  return m ? `${m[1]}.${m[2]}.${m[3]}` : iso;
 }
 
 async function search() {
@@ -62,8 +71,8 @@ async function search() {
   const date = document.getElementById('date').value;
   if (!date) { alert('Pilih tanggal dulu'); return; }
 
-  const start = new Date(`${date}T00:00:00`).toISOString();
-  const end = new Date(`${date}T23:59:59`).toISOString();
+  const start = `${date}T00:00:00Z`;
+  const end = `${date}T23:59:59Z`;
 
   const container = document.getElementById('segments');
   container.innerHTML = '<div class="empty">Mencari…</div>';
