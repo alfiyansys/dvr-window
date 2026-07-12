@@ -1,5 +1,6 @@
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -104,6 +105,14 @@ def _main_track_id(channel_id: int) -> int:
     return channel_id * 100 + 1
 
 
+def _nudge_time(iso: str, seconds: int) -> str:
+    """Add `seconds` to an ISAPI timestamp, treating it as a literal
+    wall-clock value (no timezone math) — see the note in start_playback
+    about why these "Z"-suffixed strings aren't actually UTC on this DVR."""
+    naive = datetime.fromisoformat(iso.rstrip("Z"))
+    return (naive + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 @app.get("/api/recordings")
 def search_recordings(channelId: int, start: str, end: str):
     isapi: ISAPIClient = app.state.isapi
@@ -126,8 +135,15 @@ def start_playback(req: PlaybackStartRequest):
     # Playback URIs go stale after a while (confirmed during Phase 4 recon:
     # an hour-old URI got a 400 from the DVR's RTSP server) — re-search
     # right before playing so we hand mediamtx a fresh one.
+    #
+    # Nudge the start a couple seconds past the segment's exact boundary:
+    # the DVR's CMSearch has a boundary bug where a startTime that exactly
+    # matches a segment's start returns the *previous* segment instead
+    # (confirmed by extracting a frame and reading the DVR's on-screen
+    # timestamp — landed on the prior segment until nudged).
     track_id = _main_track_id(req.channelId)
-    matches = isapi.search_recordings(track_id, req.startTime, req.endTime, max_pages=1, page_size=1)
+    search_start = _nudge_time(req.startTime, seconds=2)
+    matches = isapi.search_recordings(track_id, search_start, req.endTime, max_pages=1, page_size=1)
     if not matches:
         raise HTTPException(status_code=404, detail="No recording found for that time range")
 
