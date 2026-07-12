@@ -73,6 +73,7 @@ Device: <redacted-dvr-host>, ISAPI reachable, digest auth confirmed working with
   | 4 | Ruang Tamu | 401: H.265 1280x720 | 402: H.265 960x576 | enabled |
   | 5-8 | — | `NO VIDEO` | — | — |
   Mixed codec: channel 1 main is H.264, channels 2-4 main are H.265 — media bridge must support both.
+- **RTSP confirmed**: `rtsp://<user>:<pass>@<redacted-dvr-host>:554/Streaming/Channels/<streamID>` (capital `Channels`, e.g. `101`, `102`, `201`...). Auth is **Digest** (verified via raw `OPTIONS` request — `WWW-Authenticate: Digest realm="cdedce8cf482442bb5b60fda"`, same realm as ISAPI HTTP). No credentials → `401` on `OPTIONS`. Verified both H.264 (channel 101) and H.265 (channel 201, `hevc` + `pcm_mulaw` audio) decode fine via `ffprobe -rtsp_transport tcp`. Minor harmless ffmpeg warning on HEVC (`PPS id out of range: 0`) — cosmetic, doesn't block playback, shouldn't matter for mediamtx (repackages, doesn't decode).
 - **Channels 9 and 10 also exist** (beyond the 8 analog inputs — these would be the hybrid DVR's IP-camera channel slots) but are **currently disconnected/offline**. Not yet queried via ISAPI (likely under `/ISAPI/ContentMgmt/InputProxy/channels` for IP channel management, separate from `/ISAPI/System/Video/inputs/channels` which only covers analog). Need to re-check once they're back online — don't assume their stream/PTZ shape until then.
 - `GET /ISAPI/PTZCtrl/channels/<1-4>/capabilities` — all four report `enabled=false`, `controlProtocol=UTC`. **No PTZ camera currently attached to any active channel.** Phase 3 (PTZ) is not needed for current hardware; keep it in the plan as an optional/gated feature only (UI should hide PTZ controls when `enabled=false`), not a required v1 milestone.
 
@@ -81,7 +82,7 @@ Device: <redacted-dvr-host>, ISAPI reachable, digest auth confirmed working with
 - [x] Confirm ISAPI is reachable and enabled, HTTP (not HTTPS-only) on this firmware — confirmed.
 - [x] Confirm actual channel count/IDs in use — confirmed, 4 active analog channels (see findings above); channels 9/10 exist but offline, needs re-check later.
 - [x] Confirm which channels report PTZ capability — confirmed, none of the 4 active channels have PTZ attached.
-- [ ] Confirm RTSP auth mode (basic vs digest) and exact stream path format for this firmware (`/Streaming/channels/<ID>01`).
+- [x] Confirm RTSP auth mode and exact stream path format — confirmed, Digest auth, `/Streaming/Channels/<streamID>` (see findings above).
 - [ ] Confirm recording search response format (XML vs JSON) and whether `V4.30.300` supports `application/json` via `Accept` header — deviceInfo already showed XML-only, likely applies here too but needs its own check since CMSearch is a POST with its own body schema.
 - [ ] Check whether digest auth requires a specific `WWW-Authenticate` quirk (some old Hikvision firmwares have known digest-auth bugs requiring workarounds — check when we hit real requests).
 - [ ] Re-check channels 9/10 (likely `/ISAPI/ContentMgmt/InputProxy/channels`) once they're back online.
