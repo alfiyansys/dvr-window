@@ -1,134 +1,88 @@
 # Hikvision Local Service — Linux Port (Plan)
 
-## Target device
+Device identity, credentials, and current progress snapshot live in
+`MEMORY.md`. This file is the architecture + phase plan + technical
+reference (exact ISAPI/RTSP paths, protocol quirks) needed to keep building.
 
-- Model: **DS-7208HQHI-K1** (Turbo HD hybrid DVR, 8x HD-TVI/analog channels + up to 12 additional IP channels)
-- Serial: E0820210814CCWRG52897731WCVU
-- Firmware: V4.30.300, build 210520
+## Goal
 
-This is not a pure IP NVR — analog PTZ (if any) is controlled by the DVR itself via UTC (up-the-coax) commands, not directly by the camera. IP channels (if added) are controlled the normal ISAPI way. Both paths go through the same DVR ISAPI/RTSP endpoints, so the app doesn't need to special-case analog vs IP channels — the DVR abstracts that.
+Not a reverse-engineered clone of Windows `LocalServiceControl.exe`
+(closed-source, undocumented wire protocol, no Windows box to sniff it,
+no installer at hand). Instead: a **standalone Linux service + local web
+UI** giving the same practical capabilities — live view, playback,
+snapshot, download — built entirely on Hikvision's documented, open
+protocols:
 
-## Goal (per discussion)
-
-Not a byte-for-byte reverse-engineered clone of Windows `LocalServiceControl.exe` (closed-source, undocumented wire protocol, no Windows box available to sniff it). Instead: a **standalone Linux service + local web UI** that gives the same practical capabilities — live view, playback, PTZ, snapshot, download — built entirely on Hikvision's **documented, open protocols**:
-
-- **ISAPI** (HTTP/XML or HTTP/JSON REST, digest auth) — control plane: device/channel info, PTZ, recording search, download, event/alarm stream.
+- **ISAPI** (HTTP/XML, digest auth) — control plane: channel info, recording search, snapshot, download, events.
 - **RTSP** — media plane: live streams and time-ranged playback streams.
 
-This avoids depending on any closed-source Hikvision binary (HCNetSDK), keeps the app portable across Linux architectures (x86_64/ARM), and keeps licensing clean.
+Rejected **HCNetSDK** (Hikvision's official Linux SDK): closed-source
+blob, its own licensing, limited architecture support, Windows-shaped C
+API that doesn't map cleanly to "run a local web service." ISAPI + RTSP
+covers everything needed with a normal HTTP/RTSP client stack.
 
-## Why not HCNetSDK
-
-HCNetSDK Linux exists but is a closed-source blob with its own licensing, limited architecture support, and a Windows-shaped C API that doesn't map cleanly to "run a local web service." ISAPI + RTSP gives ~everything needed (per architecture decision already made) with a normal HTTP/RTSP client stack.
-
-## High-level architecture
+## Architecture
 
 ```
 Browser (localhost:PORT)
-   │  HTML/JS UI (live grid, PTZ joystick, playback timeline, download)
+   │  HTML/JS UI (live grid, playback timeline, download)
    ▼
-Backend service (Python)
-   ├─ ISAPI client  ──HTTP digest──▶  DVR :80   (channels, PTZ, search, snapshot, download, events)
-   ├─ RTSP handled indirectly via media bridge, not fetched raw in the backend
-   └─ Local web server (REST + WebSocket for events/status)
+Backend service (Python / FastAPI, app/)
+   ├─ ISAPI client (app/isapi.py) ──HTTP digest──▶ DVR :80  (channels, search, snapshot, download)
+   └─ Local web server: REST API + static frontend
 
-Media bridge (mediamtx, sidecar process)
-   DVR :554 (RTSP live + playback) ──▶ mediamtx ──▶ WebRTC/HLS/MSE ──▶ <video> in browser
+Media bridge (mediamtx, sidecar process, app/mediabridge.py)
+   DVR :554 (RTSP live + playback) ──▶ mediamtx ──▶ HLS/WebRTC ──▶ <video> in browser
 ```
 
-Browsers can't play raw RTSP/H.264 elementary streams directly, so a bridge is required. Using an existing, well-maintained bridge (mediamtx or go2rtc — both single Go binaries, RTSP-in / WebRTC+HLS-out) instead of writing our own RTSP-to-browser transcoder.
+Browsers can't play raw RTSP/H.264 elementary streams directly, so a
+bridge is required. Using **mediamtx** (single Go binary, RTSP-in /
+HLS+WebRTC-out, has a runtime control API for dynamic paths) instead of
+writing our own RTSP-to-browser transcoder.
 
-## Components
-
-1. **Backend service** (Python, FastAPI or Flask)
-   - Config: DVR host/port/credentials, list of channels, RTSP port, web UI port.
-   - ISAPI client: reuse/adapt an existing library (e.g. `hikvisionapi` on PyPI) rather than writing digest-auth XML parsing from scratch; wrap it for our needs.
-   - Endpoints for: channel list/capabilities, PTZ (continuous move + presets), recording search, snapshot, download (proxy ISAPI content-mgmt download), alarm/event stream (Server-Sent Events or WebSocket relayed from ISAPI's long-poll alert stream).
-   - On startup, tells mediamtx (via its config/API) which DVR RTSP URLs to expose as local sources.
-
-2. **Media bridge** (mediamtx, run as child process / systemd sidecar)
-   - Source: `rtsp://user:pass@dvr:554/Streaming/channels/<ID>01` (main stream) and `...<ID>02` (substream) for live.
-   - Playback: RTSP playback URL with `starttime`/`endtime` params for recorded segments.
-   - Output to browser: WebRTC (low latency, preferred) with HLS/MSE fallback.
-
-3. **Frontend** (static HTML/JS/CSS served by backend)
-   - Live view grid (1/4/8/16 layout), per-channel stream select (main/sub).
-   - PTZ control overlay (only shown/enabled for channels that report PTZ capability).
-   - Playback: calendar/timeline picker → recording search (ISAPI CMSearch) → play matching segment.
-   - Download button for a selected time range.
-
-4. **Packaging**: systemd user service, single `config.yaml`, run on `localhost:<port>` (default TBD, e.g. 8896 — avoiding assumptions about any specific "expected" port since none is documented).
-
-## Phase 0 findings (device recon, in progress)
-
-Device: <redacted-dvr-host>, ISAPI reachable, digest auth confirmed working with `<redacted-username>`.
-
-- `GET /ISAPI/System/deviceInfo` confirms model/firmware match, response is **XML only** (no JSON via Accept header on this firmware).
-- `GET /ISAPI/System/Video/inputs/channels` — 8 analog input slots, only 4 have video connected:
-  | ID | Name | Main stream | Sub stream | Audio |
-  |----|------|------|------|-------|
-  | 1 | Teras | 101: H.264 1920x1080 | 102: H.265 960x576 | disabled |
-  | 2 | Car Port | 201: H.265 1920x1080 | 202: H.265 960x576 | enabled |
-  | 3 | Garasi | 301: H.265 1280x720 | 302: H.265 960x576 | enabled |
-  | 4 | Ruang Tamu | 401: H.265 1280x720 | 402: H.265 960x576 | enabled |
-  | 5-8 | — | `NO VIDEO` | — | — |
-  Mixed codec: channel 1 main is H.264, channels 2-4 main are H.265 — media bridge must support both.
-- **CMSearch confirmed**: `POST /ISAPI/ContentMgmt/search` with an XML `CMSearchDescription` body (`trackID`, `timeSpanList`, `maxResults`, `searchResultPostion`). Response is **XML only** (`Accept: application/json` is ignored, same as deviceInfo). Response is paginated (`responseStatusStrg=MORE` when more results exist beyond `maxResults`) — re-issuing the identical request with the **same `searchID`** returns the next page automatically (server tracks position per searchID; client doesn't need to manage offsets manually). Each match includes a ready-to-use `playbackURI`, e.g. `rtsp://<redacted-dvr-host>/Streaming/tracks/101/?starttime=20260707T062453Z&endtime=20260707T075140Z&name=...&size=...` — note the path is `/Streaming/tracks/<trackID>/` (not `/Streaming/Channels/` used for live) — so Phase 4 can hand this URI straight to the media bridge instead of constructing playback URLs manually. Recorded codec for channel 1 (track 101) is `H.264-BP` (Baseline Profile), matching its live main-stream codec.
-- **RTSP confirmed**: `rtsp://<user>:<pass>@<redacted-dvr-host>:554/Streaming/Channels/<streamID>` (capital `Channels`, e.g. `101`, `102`, `201`...). Auth is **Digest** (verified via raw `OPTIONS` request — `WWW-Authenticate: Digest realm="cdedce8cf482442bb5b60fda"`, same realm as ISAPI HTTP). No credentials → `401` on `OPTIONS`. Verified both H.264 (channel 101) and H.265 (channel 201, `hevc` + `pcm_mulaw` audio) decode fine via `ffprobe -rtsp_transport tcp`. Minor harmless ffmpeg warning on HEVC (`PPS id out of range: 0`) — cosmetic, doesn't block playback, shouldn't matter for mediamtx (repackages, doesn't decode).
-- **Channels 9 and 10 also exist** (beyond the 8 analog inputs — these would be the hybrid DVR's IP-camera channel slots) but are **currently disconnected/offline**. Not yet queried via ISAPI (likely under `/ISAPI/ContentMgmt/InputProxy/channels` for IP channel management, separate from `/ISAPI/System/Video/inputs/channels` which only covers analog). Need to re-check once they're back online — don't assume their stream/PTZ shape until then.
-- `GET /ISAPI/PTZCtrl/channels/<1-4>/capabilities` — all four report `enabled=false`, `controlProtocol=UTC`. **No PTZ camera currently attached to any active channel.** Phase 3 (PTZ) is not needed for current hardware; keep it in the plan as an optional/gated feature only (UI should hide PTZ controls when `enabled=false`), not a required v1 milestone.
-
-## Open questions to verify against the real device (Phase 0)
-
-- [x] Confirm ISAPI is reachable and enabled, HTTP (not HTTPS-only) on this firmware — confirmed.
-- [x] Confirm actual channel count/IDs in use — confirmed, 4 active analog channels (see findings above); channels 9/10 exist but offline, needs re-check later.
-- [x] Confirm which channels report PTZ capability — confirmed, none of the 4 active channels have PTZ attached.
-- [x] Confirm RTSP auth mode and exact stream path format — confirmed, Digest auth, `/Streaming/Channels/<streamID>` (see findings above).
-- [x] Confirm recording search response format — confirmed, XML-only (see findings above); also confirmed pagination behavior and that the server returns ready-to-use playback URIs.
-- [x] Check for digest-auth quirks — none found. 10 concurrent digest-authenticated requests to `deviceInfo` all succeeded (~20-48ms each), server supports keep-alive (`timeout=60, max=99`), and standard RFC digest handshake worked across every endpoint tested (deviceInfo, channels, PTZ, CMSearch, RTSP OPTIONS) with no special `qop`/`nc`/session workarounds needed. A standard HTTP digest-auth client library is sufficient.
-- [ ] Re-check channels 9/10 (likely `/ISAPI/ContentMgmt/InputProxy/channels`) once they're back online.
-
-Phase 0 is a short, hands-on step against the physical unit (`curl`/Postman-style checks) before writing real backend code, so later phases build on confirmed facts instead of assumptions from datasheets.
-
-## Phase 2 findings (live view, in progress)
-
-- **mediamtx bridge works end-to-end**: backend spawns mediamtx as a child process (`app/mediabridge.py`), generates its config from the live channel list (RTSP source per stream, `sourceOnDemand: true` so the DVR isn't connected to until a client actually watches), exposes HLS (`:8888`) and WebRTC (`:8889`). Verified live in an actual Chrome browser via the static grid UI (`static/index.html`, `/api/streams`) — channel 1 (H.264) renders live video successfully.
-- **Browser HEVC/H.265 playback doesn't work in Chrome**: channels 2-4 (Car Port, Garasi, Ruang Tamu) fail to play — confirmed root cause is the browser, not our pipeline: `MediaSource.isTypeSupported('video/mp4; codecs=hvc1...')` returns `false` in Chrome/Chromium on this Linux box (HEVC decode isn't available via MSE — a licensing limitation of Chromium, not a bug in mediamtx or our code; mediamtx correctly serves the HEVC HLS stream, confirmed earlier via `ffprobe`).
-- **Fix decided**: change channels 2-4's live/recording codec from H.265 to H.264 via ISAPI (`PUT /ISAPI/Streaming/channels/<id>`, confirmed H.264 is an available option via `/ISAPI/Streaming/channels/<id>/capabilities`). **Blocked**: the `<redacted-username>` account got `403 lowPrivilege` / `subStatusCode: lowPrivilege` on the PUT — this account is read/live-view-only, not authorized for remote config changes. User will change the codec manually via the DVR's own on-screen menu (Configuration → Video/Audio) instead. **Resolved**: user changed channels 2-4 to H.264 via the DVR menu, confirmed via ISAPI (`videoCodecType` now `H.264` on 201/301/401), and re-verified live in Chrome — all 4 channels (Teras, Car Port, Garasi, Ruang Tamu) now render live video successfully in the grid UI. mediamtx needed no restart (it follows whatever codec the RTSP source actually sends). Phase 2 core goal (live view working end-to-end in a real browser) is done.
+- **Backend** (`app/`): config loading (`config.py`), ISAPI client
+  (`isapi.py`), mediamtx process + dynamic path management
+  (`mediabridge.py`), FastAPI routes (`main.py`).
+- **Frontend** (`static/`): plain HTML/JS, no build step. `index.html`
+  (live grid), `playback.html` (search + play recordings). hls.js
+  vendored locally (no CDN dependency).
+- **Packaging** (not started): systemd service, install script.
 
 ## Milestones
 
-**Phase 0 — Device recon** (no app code)
-Verify all "Open questions" above against the physical DVR. Produce a short findings note (exact ISAPI paths/response formats that work).
+| Phase | Status | What |
+|---|---|---|
+| 0 | ✅ done | Device recon — confirm ISAPI/RTSP paths, auth, channel/PTZ capability against the physical DVR |
+| 1 | ✅ done | Backend core — config, ISAPI client, `/api/channels` |
+| 2 | ✅ done | Live view — mediamtx bridge, `/api/streams`, live grid UI |
+| 3 | ⬜ skipped | PTZ — no PTZ hardware attached to any active channel; revisit only if that changes |
+| 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
+| 5 | ⬜ next | Snapshot & download |
+| 6 | ⬜ not started | Polish/packaging — systemd service, playback-path GC, event/alarm stream, basic auth on the local UI |
 
-**Phase 1 — Backend core**
-Config loading, ISAPI client wrapper, `/api/channels` endpoint returning real channel list + capabilities from the device.
+### Phase 0 — device recon
 
-**Phase 2 — Live view**
-Stand up mediamtx as sidecar, wire DVR RTSP channels as sources, serve a live-view grid page in the browser (WebRTC first, HLS fallback).
+- ISAPI: HTTP (not HTTPS-only), digest auth, **XML-only** responses (`Accept: application/json` is ignored on this firmware) — confirmed on `deviceInfo`, channel list, `CMSearch`.
+- Channels: `GET /ISAPI/System/Video/inputs/channels` (analog inputs), `GET /ISAPI/Streaming/channels` (per-stream codec/resolution/audio), `GET /ISAPI/PTZCtrl/channels/<id>/capabilities` (PTZ). Current channel state is in `MEMORY.md`.
+- RTSP: `rtsp://user:pass@host:554/Streaming/Channels/<streamID>` (capital `Channels`), Digest auth, same realm as ISAPI HTTP.
+- `CMSearch`: `POST /ISAPI/ContentMgmt/search`, XML body (`searchID`, `trackList`, `timeSpanList`, `maxResults`, `searchResultPostion`). Paginated: re-issuing the identical request with the **same `searchID`** auto-advances to the next page (server tracks position). Each match includes a ready-to-use `playbackURI` under `/Streaming/tracks/<trackID>/`.
+- Digest auth: no quirks — handles 10+ concurrent requests fine, standard RFC handshake, no special `qop`/`nc` workarounds needed.
+- `<redacted-username>` account is **read/live-view only** — any `PUT` (e.g. changing a channel's codec) returns `403 lowPrivilege`. Config changes need either elevated privilege on this account or separate admin credentials.
 
-**Phase 3 — PTZ**
-Continuous-move + stop + presets via ISAPI, joystick UI overlay, gated by per-channel capability check from Phase 1.
+### Phase 2 — live view
 
-**Phase 4 — Playback & search**
-ISAPI recording search (`CMSearch`), timeline/calendar UI, play a selected segment through mediamtx using RTSP playback URL with time range.
+- mediamtx spawned as child process, config generated from the live channel list (`sourceOnDemand: true` so the DVR isn't connected to until someone's actually watching), HLS on `:8888`, WebRTC on `:8889`.
+- Chrome/Chromium has **no HEVC-via-MSE support** — H.265 channels showed a black frame with `error` status until their codec was switched to H.264 on the DVR itself (done manually via the DVR menu, since the ISAPI account lacks privilege for that PUT). mediamtx needed no restart — it follows whatever codec the RTSP source actually sends.
 
-**Phase 4 findings (done)**
-- CMSearch pagination confirmed working via same-searchID reuse (see Phase 0 findings); `ISAPIClient.search_recordings()` loops this automatically.
-- **Playback URIs go stale**: an hour-old `playbackURI` from an earlier CMSearch got a `400 Bad Request` from the DVR's RTSP server. Fix: `/api/playback/start` always re-searches (tightly scoped to the exact segment time range) immediately before handing the URI to mediamtx, rather than reusing a URI a user may have looked at minutes earlier.
-- **mediamtx's control API** (`127.0.0.1:9997`, enabled via `api: true` in the generated config) supports registering/deregistering paths at runtime — `POST /v3/config/paths/add/{name}` (JSON body: `source`, `sourceOnDemand`), `DELETE /v3/config/paths/delete/{name}`. This is how playback is bridged: one throwaway path per playback session, created on `/api/playback/start`, removed on `/api/playback/stop`. Verified the path is actually gone from `/v3/paths/list` after stop.
-- Verified end-to-end in Chrome against real DVR recordings (channel 1, night-vision footage with DVR's own timestamp overlay visible), including Stop correctly tearing down the mediamtx path.
-- Known gap (not yet handled): no TTL/garbage-collection for playback paths if a client starts playback and never calls stop (e.g. tab closed). Fine for single-user local use for now; worth revisiting before Phase 6 packaging.
+### Phase 4 — playback & search
 
-**Bugs found via user report ("jam di playback list tidak sesuai dengan timestamp video") and fixed:**
-1. **CMSearch exact-boundary bug (DVR firmware)**: when the search `startTime` exactly equals a segment's own start boundary, the DVR returns the *previous* segment instead of the requested one. Root-caused by extracting an HLS frame with `ffmpeg -frames:v 1` and reading the DVR's on-screen timestamp overlay directly — this is the most reliable way to verify what the DVR actually did, since ISAPI/RTSP responses alone don't prove which segment actually got played. Fix: `/api/playback/start` nudges the search start 2 seconds forward (`_nudge_time` in `app/main.py`) before re-searching, landing safely inside the intended segment instead of exactly on its edge.
-2. **DVR ISAPI timestamps aren't real UTC despite the "Z" suffix**: confirmed by comparing the DVR's `/ISAPI/System/time` (`localTime: 2026-07-12T13:35:50+07:00`, correct via NTP) against a playback frame's on-screen overlay — the overlay matched the raw ISAPI digits exactly, not those digits shifted by the device's own +7:00 offset. So CMSearch/RTSP-playback timestamps are the DVR's local wall-clock digits with a misleading "Z" appended, not true UTC. The frontend (`static/playback.html`) was round-tripping these through `new Date(...).toISOString()`/`toLocaleTimeString()`, which applies the *browser's* real timezone — this only looked correct while testing in a UTC-timezone browser and would be off by 7 hours for a real user on WIB. Fixed by reading/writing the digits literally (regex extraction / plain string formatting), never through JS `Date` timezone conversion. **Implication for later phases**: any new code touching these timestamps (downloads, snapshots-by-time, event/alarm timestamps) must follow the same rule — treat ISAPI's "Z" timestamps as opaque local digits, not real UTC.
-
-**Phase 5 — Snapshot & download**
-Snapshot endpoint (`/ISAPI/Streaming/channels/<ID>/picture`), download-by-time-range proxy, save-to-disk in browser.
-
-**Phase 6 — Polish / packaging**
-systemd service file, install script, alarm/event stream (motion/etc.) surfaced as live notifications in the UI, basic auth for the local web UI itself (since it holds DVR credentials).
+- `ISAPIClient.search_recordings()` loops `CMSearch` pages automatically (same-searchID pagination).
+- **`playbackURI` goes stale**: an hour-old one got `400 Bad Request` from the DVR's RTSP server. `/api/playback/start` always re-searches immediately before handing the URI to mediamtx.
+- mediamtx's **control API** (`127.0.0.1:9997`, `api: true` in generated config) registers/deregisters paths at runtime: `POST /v3/config/paths/add/{name}` (JSON: `source`, `sourceOnDemand`), `DELETE /v3/config/paths/delete/{name}`. Playback = one throwaway path per session, created on start, removed on stop.
+- Known gap: no TTL/GC if a client abandons playback without calling stop (e.g. tab closed). Fine for single-user local use; revisit at Phase 6.
+- **Two bugs found via user report** ("jam di playback list tidak sesuai dengan timestamp video"), both diagnosed by extracting an HLS frame with `ffmpeg -frames:v 1` and reading the DVR's own on-screen timestamp overlay (the only reliable way to verify what the DVR actually played — ISAPI/RTSP responses alone don't prove it):
+  1. **CMSearch exact-boundary bug**: a search `startTime` that exactly equals a segment's start returns the *previous* segment instead. Fixed by nudging the search start 2 seconds forward (`_nudge_time` in `app/main.py`) before re-searching.
+  2. **ISAPI timestamps aren't real UTC** despite the "Z" suffix — they're the DVR's own local wall-clock digits (WIB, UTC+7), unconverted (confirmed against `/ISAPI/System/time`, which is correctly NTP-synced). Fixed by reading/writing these strings as literal digits everywhere (regex extraction, plain string formatting) instead of routing them through `Date`/`toISOString()`/timezone-aware datetime math, which silently applies the browser's or server's real timezone on top and only looked right by accident when the test browser happened to be UTC. **Applies to all future code touching ISAPI timestamps** (Phase 5 download-by-time-range, any future event timestamps).
 
 ## Non-goals (for now)
 
@@ -139,4 +93,4 @@ systemd service file, install script, alarm/event stream (motion/etc.) surfaced 
 
 ## Next step
 
-Run Phase 0 against the physical DS-7208HQHI-K1 (need its LAN IP + admin credentials) to confirm the open questions above, then start Phase 1.
+Phase 5 — snapshot (`/ISAPI/Streaming/channels/<ID>/picture`) and download-by-time-range (ISAPI content-mgmt download, proxied through the backend so the browser can save-to-disk).
