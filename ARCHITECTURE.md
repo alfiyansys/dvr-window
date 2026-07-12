@@ -21,22 +21,33 @@ installer at hand.
 
 ## Components
 
-```
-Browser (localhost:PORT)
-   │  HTML/JS UI (live grid, playback timeline, download)
-   ▼
-Backend service (Python / FastAPI, app/)
-   ├─ ISAPI client (app/isapi.py) ──HTTP digest──▶ DVR :80  (channels, search, snapshot, download)
-   └─ Local web server: REST API + static frontend
+```mermaid
+flowchart TB
+    Browser["Browser (localhost:PORT)<br/>live grid · playback timeline · download"]
 
-Media bridge (mediamtx, sidecar process, app/mediabridge.py)
-   DVR :554 (RTSP live + playback) ──▶ mediamtx ──▶ HLS/WebRTC ──▶ <video> in browser
+    subgraph Backend["Backend service (Python / FastAPI, app/)"]
+        WebServer["Local web server<br/>REST API + static frontend"]
+        ISAPIClient["ISAPI client<br/>(app/isapi.py)"]
+    end
+
+    DVR_HTTP["DVR :80 — ISAPI<br/>channels · search · snapshot · download"]
+
+    Bridge["Media bridge: mediamtx<br/>sidecar process (app/mediabridge.py)"]
+    DVR_RTSP["DVR :554 — RTSP<br/>live + playback streams"]
+
+    Browser <-->|HTTP| WebServer
+    WebServer --> ISAPIClient
+    ISAPIClient <-->|HTTP digest| DVR_HTTP
+    DVR_RTSP <-->|RTSP| Bridge
+    Bridge -->|HLS / WebRTC| Browser
 ```
 
-Browsers can't play raw RTSP/H.264 elementary streams directly, so a
-bridge is required. Using **mediamtx** (single Go binary, RTSP-in /
-HLS+WebRTC-out, has a runtime control API for dynamic paths) instead of
-writing our own RTSP-to-browser transcoder.
+Browsers can't play raw RTSP/H.264 elementary streams directly, so the
+media bridge is a separate path from the ISAPI control-plane calls —
+`<video>` in the browser talks to mediamtx directly (not proxied
+through the FastAPI backend). Using **mediamtx** (single Go binary,
+RTSP-in / HLS+WebRTC-out, has a runtime control API for dynamic paths)
+instead of writing our own RTSP-to-browser transcoder.
 
 - **Backend** (`app/`): config loading (`config.py`), ISAPI client
   (`isapi.py`), mediamtx process + dynamic path management
