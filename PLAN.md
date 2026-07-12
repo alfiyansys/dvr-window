@@ -85,7 +85,7 @@ Device: <redacted-dvr-host>, ISAPI reachable, digest auth confirmed working with
 - [x] Confirm which channels report PTZ capability — confirmed, none of the 4 active channels have PTZ attached.
 - [x] Confirm RTSP auth mode and exact stream path format — confirmed, Digest auth, `/Streaming/Channels/<streamID>` (see findings above).
 - [x] Confirm recording search response format — confirmed, XML-only (see findings above); also confirmed pagination behavior and that the server returns ready-to-use playback URIs.
-- [ ] Check whether digest auth requires a specific `WWW-Authenticate` quirk (some old Hikvision firmwares have known digest-auth bugs requiring workarounds — check when we hit real requests).
+- [x] Check for digest-auth quirks — none found. 10 concurrent digest-authenticated requests to `deviceInfo` all succeeded (~20-48ms each), server supports keep-alive (`timeout=60, max=99`), and standard RFC digest handshake worked across every endpoint tested (deviceInfo, channels, PTZ, CMSearch, RTSP OPTIONS) with no special `qop`/`nc`/session workarounds needed. A standard HTTP digest-auth client library is sufficient.
 - [ ] Re-check channels 9/10 (likely `/ISAPI/ContentMgmt/InputProxy/channels`) once they're back online.
 
 Phase 0 is a short, hands-on step against the physical unit (`curl`/Postman-style checks) before writing real backend code, so later phases build on confirmed facts instead of assumptions from datasheets.

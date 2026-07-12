@@ -53,7 +53,9 @@ backend exists, not in any tracked file or commit message.
 ## Progress
 
 - [x] Phase 0 — device recon: ISAPI reachability, channel list, PTZ
-      capability, RTSP auth/path, CMSearch format all confirmed (see
-      `PLAN.md` "Phase 0 findings" for exact details).
+      capability, RTSP auth/path, CMSearch format, digest-auth behavior
+      (no quirks, standard client library works, handles 10+ concurrent
+      requests fine) all confirmed (see `PLAN.md` "Phase 0 findings" for
+      exact details).
 - [ ] Re-verify channels 9/10 once back online.
 - [ ] Phase 1 — backend core (not started).
