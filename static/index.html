@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Hikvision Local Service</title>
+<script src="/static/vendor/hls.min.js"></script>
+<style>
+  body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  h1 { font-size: 18px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+  .cell { background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
+  .cell video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
+  .cell .label { padding: 6px 10px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; }
+  .cell .status { font-size: 11px; }
+  .status.ok { color: #4ade80; }
+  .status.err { color: #f87171; }
+  .status.loading { color: #fbbf24; }
+</style>
+</head>
+<body>
+<h1>Live View</h1>
+<div id="grid" class="grid"></div>
+
+<script>
+async function main() {
+  const res = await fetch('/api/streams');
+  const data = await res.json();
+  const grid = document.getElementById('grid');
+
+  for (const ch of data.channels) {
+    const mainStream = ch.streams.find(s => s.kind === 'main');
+    if (!mainStream) continue;
+
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.innerHTML = `
+      <video muted autoplay playsinline></video>
+      <div class="label"><span>${ch.name}</span><span class="status loading">connecting…</span></div>
+    `;
+    grid.appendChild(cell);
+
+    const video = cell.querySelector('video');
+    const status = cell.querySelector('.status');
+    const hlsUrl = `http://${location.hostname}:${data.hlsPort}${mainStream.hlsPath}`;
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({ lowLatencyMode: true });
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { status.textContent = 'live'; status.className = 'status ok'; });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (data.fatal) { status.textContent = 'error'; status.className = 'status err'; }
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = hlsUrl;
+      video.addEventListener('loadedmetadata', () => { status.textContent = 'live'; status.className = 'status ok'; });
+    } else {
+      status.textContent = 'HLS not supported';
+      status.className = 'status err';
+    }
+  }
+}
+
+main();
+</script>
+</body>
+</html>
