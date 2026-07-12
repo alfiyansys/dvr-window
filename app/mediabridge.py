@@ -13,6 +13,7 @@ RUNTIME_CONFIG_PATH = MEDIAMTX_DIR / "runtime.yml"
 
 HLS_PORT = 8888
 WEBRTC_PORT = 8889
+API_PORT = 9997
 
 
 def stream_path_name(channel_id: int, stream_id: str) -> str:
@@ -50,6 +51,8 @@ class MediaBridge:
             "rtmp": False,
             "srt": False,
             "moq": False,
+            "api": True,
+            "apiAddress": f"127.0.0.1:{API_PORT}",
             "paths": paths,
         }
         RUNTIME_CONFIG_PATH.write_text(yaml.safe_dump(config))
@@ -79,6 +82,17 @@ class MediaBridge:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
             self._proc = None
+
+    def add_playback_path(self, name: str, source_url: str) -> None:
+        resp = httpx.post(
+            f"http://127.0.0.1:{API_PORT}/v3/config/paths/add/{name}",
+            json={"source": source_url, "sourceOnDemand": True},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+
+    def remove_playback_path(self, name: str) -> None:
+        httpx.delete(f"http://127.0.0.1:{API_PORT}/v3/config/paths/delete/{name}", timeout=5.0)
 
     def stream_paths(self, name: str) -> dict:
         """Path portion of the mediamtx URLs for this stream — the frontend
