@@ -58,4 +58,19 @@ backend exists, not in any tracked file or commit message.
       requests fine) all confirmed (see `PLAN.md` "Phase 0 findings" for
       exact details).
 - [ ] Re-verify channels 9/10 once back online.
-- [ ] Phase 1 — backend core (not started).
+- [x] Phase 1 — backend core: FastAPI app (`app/`), digest-auth ISAPI
+      client (`app/isapi.py`, httpx + xmltodict), config loading
+      (`config.yaml` for non-secrets, `HIKVISION_PASSWORD` env var for
+      the credential via `.env`, see `.env.example`). `/api/channels`
+      and `/api/device` verified end-to-end against the real device.
+- [ ] Phase 2 — live view (media bridge + browser grid) — not started.
+
+## Running the backend
+
+```
+python3 -m venv .venv --without-pip   # this box has no system pip/ensurepip
+curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env   # fill in HIKVISION_PASSWORD
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8896
+```
