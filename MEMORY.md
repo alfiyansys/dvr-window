@@ -3,8 +3,11 @@
 Durable context for this project, tracked in git so it's available on every
 device this repo is cloned to. (Distinct from Claude Code's own per-machine
 memory system — this is a plain file, intentionally.) Short-form "pick up
-where we left off" — architecture, phase plan, and full technical/protocol
-findings live in `PLAN.md`.
+where we left off" — device identity and current state only. See
+`PLAN.md` for the phase roadmap/status, `ARCHITECTURE.md` for technical
+design and protocol/device-quirk reference, and `AGENTS.md` for
+setup/run instructions and conventions if you're an agent working in
+this repo.
 
 ## Target device
 
@@ -20,7 +23,7 @@ in a local, gitignored `.env` (`HIKVISION_PASSWORD=...`, see `.env.example`).
 
 ## Device state (as of 2026-07-12)
 
-- 4 active analog channels, all main streams now H.264 (2-4 were switched from H.265 manually via the DVR menu, needed for Chrome playback — see `PLAN.md` Phase 2): 1 Teras, 2 Car Port, 3 Garasi, 4 Ruang Tamu. Sub-streams may still be H.265, not yet used by the UI. Channels 5-8: no video input.
+- 4 active analog channels, all main streams now H.264 (2-4 were switched from H.265 manually via the DVR menu, needed for Chrome playback — see `ARCHITECTURE.md` "Known device quirks and bugs"): 1 Teras, 2 Car Port, 3 Garasi, 4 Ruang Tamu. Sub-streams may still be H.265, not yet used by the UI. Channels 5-8: no video input.
 - Channels 9-10 exist (likely IP-camera slots on this hybrid DVR) but were **offline** at last check — re-verify before assuming their protocol shape matches the analog channels.
 - No PTZ hardware attached to any active channel — Phase 3 skipped.
 
@@ -32,18 +35,9 @@ in a local, gitignored `.env` (`HIKVISION_PASSWORD=...`, see `.env.example`).
 - [ ] Phase 6 (packaging).
 - [ ] Re-verify channels 9/10 once back online.
 
-## Gotchas to remember before touching ISAPI timestamps or playback
+## Before touching ISAPI timestamps or playback
 
-- DVR's ISAPI/CMSearch timestamps are labeled "Z" (UTC) but are actually its own **local wall-clock digits (WIB, UTC+7), unconverted**. Never round-trip them through `Date`/`toISOString()`/timezone-aware datetime math — read/write them as literal digits. Full story in `PLAN.md` Phase 4.
-- CMSearch has a boundary bug: a search `startTime` exactly matching a segment's start returns the *previous* segment. Workaround: nudge the search start a couple seconds forward.
-- Recording `playbackURI`s go stale (an hour-old one got `400` from the DVR) — always re-search right before playing, don't cache and reuse.
-
-## Running the backend
-
-```
-python3 -m venv .venv --without-pip   # this box has no system pip/ensurepip
-curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env   # fill in HIKVISION_PASSWORD
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8896
-```
+Read `ARCHITECTURE.md` → "Known device quirks and bugs" first — fake-UTC
+timestamps, a `CMSearch` boundary bug, and `playbackURI` staleness have
+already bitten this project once each. Setup/run instructions are in
+`AGENTS.md`.
