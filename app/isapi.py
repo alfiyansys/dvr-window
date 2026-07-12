@@ -1,3 +1,4 @@
+import uuid
 from typing import Any
 
 import httpx
@@ -58,7 +59,7 @@ class ISAPIClient:
                 return None
             raise
 
-    def search_recordings(self, search_id: str, track_id: int, start_time: str, end_time: str, max_results: int = 40) -> dict:
+    def _search_recordings_page(self, search_id: str, track_id: int, start_time: str, end_time: str, max_results: int) -> dict:
         body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <CMSearchDescription>
 <searchID>{search_id}</searchID>
@@ -78,3 +79,27 @@ class ISAPIClient:
 </metadataList>
 </CMSearchDescription>"""
         return self._post_xml("/ISAPI/ContentMgmt/search", body)["CMSearchResult"]
+
+    def search_recordings(self, track_id: int, start_time: str, end_time: str, max_pages: int = 10, page_size: int = 40) -> list[dict]:
+        """Search recorded segments for a track over a time range.
+
+        The DVR paginates results and, when re-issuing the identical
+        request with the *same* searchID, advances to the next page
+        automatically (server tracks position per searchID) — confirmed
+        during Phase 0 recon. Loops until responseStatusStrg != "MORE" or
+        max_pages is hit, as a safety cap against unbounded loops.
+        """
+        search_id = str(uuid.uuid4())
+        matches: list[dict] = []
+        for _ in range(max_pages):
+            result = self._search_recordings_page(search_id, track_id, start_time, end_time, page_size)
+            for item in _as_list(result.get("matchList", {}).get("searchMatchItem")):
+                matches.append({
+                    "startTime": item["timeSpan"]["startTime"],
+                    "endTime": item["timeSpan"]["endTime"],
+                    "playbackURI": item["mediaSegmentDescriptor"]["playbackURI"],
+                    "codecType": item["mediaSegmentDescriptor"]["codecType"],
+                })
+            if result.get("responseStatusStrg") != "MORE":
+                break
+        return matches
