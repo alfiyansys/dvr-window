@@ -59,14 +59,32 @@ Browsers can't play raw RTSP/H.264 elementary streams directly, so a bridge is r
 
 4. **Packaging**: systemd user service, single `config.yaml`, run on `localhost:<port>` (default TBD, e.g. 8896 — avoiding assumptions about any specific "expected" port since none is documented).
 
+## Phase 0 findings (device recon, in progress)
+
+Device: <redacted-dvr-host>, ISAPI reachable, digest auth confirmed working with `<redacted-username>`.
+
+- `GET /ISAPI/System/deviceInfo` confirms model/firmware match, response is **XML only** (no JSON via Accept header on this firmware).
+- `GET /ISAPI/System/Video/inputs/channels` — 8 analog input slots, only 4 have video connected:
+  | ID | Name | Main stream | Sub stream | Audio |
+  |----|------|------|------|-------|
+  | 1 | Teras | 101: H.264 1920x1080 | 102: H.265 960x576 | disabled |
+  | 2 | Car Port | 201: H.265 1920x1080 | 202: H.265 960x576 | enabled |
+  | 3 | Garasi | 301: H.265 1280x720 | 302: H.265 960x576 | enabled |
+  | 4 | Ruang Tamu | 401: H.265 1280x720 | 402: H.265 960x576 | enabled |
+  | 5-8 | — | `NO VIDEO` | — | — |
+  Mixed codec: channel 1 main is H.264, channels 2-4 main are H.265 — media bridge must support both.
+- **Channels 9 and 10 also exist** (beyond the 8 analog inputs — these would be the hybrid DVR's IP-camera channel slots) but are **currently disconnected/offline**. Not yet queried via ISAPI (likely under `/ISAPI/ContentMgmt/InputProxy/channels` for IP channel management, separate from `/ISAPI/System/Video/inputs/channels` which only covers analog). Need to re-check once they're back online — don't assume their stream/PTZ shape until then.
+- `GET /ISAPI/PTZCtrl/channels/<1-4>/capabilities` — all four report `enabled=false`, `controlProtocol=UTC`. **No PTZ camera currently attached to any active channel.** Phase 3 (PTZ) is not needed for current hardware; keep it in the plan as an optional/gated feature only (UI should hide PTZ controls when `enabled=false`), not a required v1 milestone.
+
 ## Open questions to verify against the real device (Phase 0)
 
-- [ ] Confirm ISAPI is reachable and enabled (`GET /ISAPI/System/deviceInfo`), and whether it's HTTP-only or HTTPS-only on this firmware.
-- [ ] Confirm actual channel count/IDs in use (analog 1-8, plus any IP channels added) via `GET /ISAPI/System/Video/inputs/channels`.
-- [ ] Confirm which channels report PTZ capability (`GET /ISAPI/PTZCtrl/channels/<ID>/capabilities`) — many analog Turbo HD setups have no PTZ camera attached.
+- [x] Confirm ISAPI is reachable and enabled, HTTP (not HTTPS-only) on this firmware — confirmed.
+- [x] Confirm actual channel count/IDs in use — confirmed, 4 active analog channels (see findings above); channels 9/10 exist but offline, needs re-check later.
+- [x] Confirm which channels report PTZ capability — confirmed, none of the 4 active channels have PTZ attached.
 - [ ] Confirm RTSP auth mode (basic vs digest) and exact stream path format for this firmware (`/Streaming/channels/<ID>01`).
-- [ ] Confirm recording search response format (XML vs JSON) and whether `V4.30.300` supports `application/json` via `Accept` header (older firmwares are XML-only).
+- [ ] Confirm recording search response format (XML vs JSON) and whether `V4.30.300` supports `application/json` via `Accept` header — deviceInfo already showed XML-only, likely applies here too but needs its own check since CMSearch is a POST with its own body schema.
 - [ ] Check whether digest auth requires a specific `WWW-Authenticate` quirk (some old Hikvision firmwares have known digest-auth bugs requiring workarounds — check when we hit real requests).
+- [ ] Re-check channels 9/10 (likely `/ISAPI/ContentMgmt/InputProxy/channels`) once they're back online.
 
 Phase 0 is a short, hands-on step against the physical unit (`curl`/Postman-style checks) before writing real backend code, so later phases build on confirmed facts instead of assumptions from datasheets.
 
