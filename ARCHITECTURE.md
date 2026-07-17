@@ -219,6 +219,34 @@ Two dead ends hit along the way, kept here so they aren't retried:
   The real cutoff is enforced by ffmpeg's `-t`, not by trusting the
   DVR/mediamtx to stop on their own.
 
+## Snapshot design
+
+`/api/snapshot` doesn't use ISAPI's own `/ISAPI/Streaming/channels/<id>/picture`
+endpoint. Confirmed empirically: on this firmware it always returns a
+fixed 704x576 (4:3) JPEG regardless of the channel's actual configured
+main-stream resolution (e.g. 1920x1080 or 1280x720, 16:9) — squashing
+the real 16:9 sensor image into that frame produces a visibly
+distorted snapshot. It also flatly `400`s for the IP-proxy channels
+(9/10) rather than returning anything.
+
+Instead, `MediaBridge.capture_frame` grabs a real frame from the same
+mediamtx path the live view itself plays, via the RTSP re-serve (same
+approach as clip downloads, see below) — `ffmpeg -frames:v 1` against
+`rtsp://viewer:{AUTH_KEY}@127.0.0.1:{RTSP_PORT}/{name}`. This matches
+the live view's actual proportions and works for every channel,
+including 9/10 where the ISAPI endpoint didn't work at all.
+
+One IP-proxy channel (confirmed on channel 9 specifically, not every
+source) only sends H.264 parameter sets every few seconds — too
+infrequent for the instant single-frame grab, which fails fast with
+"Could not find codec parameters" instead of waiting (empirically,
+`-t 2` of connection time isn't enough, `-t 3`+ reliably is).
+`capture_frame` tries the instant grab first (works immediately for
+every other channel) and only falls back to a short stream-copy
+capture + frame-extraction from that local file when the fast path
+fails — keeping the common case fast while still working reliably for
+this one channel's slower parameter-set cadence.
+
 ## Continuous playback across recording segments
 
 Playback of a single segment used to just silently freeze once it

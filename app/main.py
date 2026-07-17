@@ -20,6 +20,9 @@ DOWNLOAD_DIR = Path(__file__).resolve().parent.parent / "tmp" / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_DOWNLOAD_SECONDS = 300
 
+SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "tmp" / "snapshots"
+SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -321,8 +324,16 @@ def stop_playback(req: PlaybackStopRequest):
 
 @app.get("/api/snapshot")
 def get_snapshot(channelId: int):
-    isapi: ISAPIClient = app.state.isapi
-    jpeg = isapi.get_snapshot(_main_track_id(channelId))
+    # Not ISAPI's own /picture endpoint — see MediaBridge.capture_frame for
+    # why (fixed 704x576 capture on this firmware, wrong aspect ratio).
+    bridge: MediaBridge = app.state.bridge
+    name = stream_path_name(channelId, str(_main_track_id(channelId)))
+    output_path = SNAPSHOT_DIR / f"{name}_{uuid.uuid4().hex[:8]}.jpg"
+    try:
+        bridge.capture_frame(name, output_path)
+        jpeg = output_path.read_bytes()
+    finally:
+        output_path.unlink(missing_ok=True)
     return Response(content=jpeg, media_type="image/jpeg")
 
 

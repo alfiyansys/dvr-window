@@ -1,6 +1,7 @@
 import os
 import shlex
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -221,6 +222,60 @@ class MediaBridge:
         result = subprocess.run(cmd, timeout=duration_seconds + 20, capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg capture failed: {result.stderr.decode(errors='replace')}")
+
+    def capture_frame(self, name: str, output_path: Path) -> None:
+        """Grab one real frame from a live path via the RTSP re-serve, for
+        `/api/snapshot`.
+
+        Not using the DVR's own ISAPI `/picture` endpoint: confirmed
+        empirically that on this firmware it always returns a fixed
+        704x576 (4:3) capture regardless of the channel's actual
+        configured main-stream resolution (1920x1080/1280x720, 16:9) —
+        squashing the real 16:9 sensor image into that frame produces a
+        visibly distorted snapshot. Grabbing a frame from the same
+        stream the live view actually plays avoids this entirely.
+        """
+        url = f"rtsp://{MEDIAMTX_AUTH_USER}:{AUTH_KEY}@127.0.0.1:{RTSP_PORT}/{name}"
+
+        fast_cmd = [
+            "ffmpeg", "-y", "-v", "warning",
+            "-rtsp_transport", "tcp",
+            "-i", url,
+            "-frames:v", "1",
+            str(output_path),
+        ]
+        result = subprocess.run(fast_cmd, timeout=15, capture_output=True)
+        if result.returncode == 0:
+            return
+
+        # One IP-proxy channel (confirmed empirically, not every source)
+        # only sends H.264 parameter sets every few seconds — too
+        # infrequent for an instant single-frame grab, which fails fast
+        # with "Could not find codec parameters" instead of waiting.
+        # Fall back to a short stream-copy capture (reliably long enough
+        # to catch a parameter set/keyframe) and extract the still frame
+        # from that local file instead.
+        with tempfile.NamedTemporaryFile(suffix=".mp4", dir=output_path.parent, delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            clip_cmd = [
+                "ffmpeg", "-y", "-v", "warning",
+                "-rtsp_transport", "tcp",
+                "-i", url,
+                "-t", "4",
+                "-c:v", "copy", "-an",
+                str(tmp_path),
+            ]
+            clip_result = subprocess.run(clip_cmd, timeout=20, capture_output=True)
+            if clip_result.returncode != 0:
+                raise RuntimeError(f"ffmpeg snapshot capture failed: {clip_result.stderr.decode(errors='replace')}")
+
+            frame_cmd = ["ffmpeg", "-y", "-v", "warning", "-i", str(tmp_path), "-frames:v", "1", str(output_path)]
+            frame_result = subprocess.run(frame_cmd, timeout=15, capture_output=True)
+            if frame_result.returncode != 0:
+                raise RuntimeError(f"ffmpeg snapshot capture failed: {frame_result.stderr.decode(errors='replace')}")
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     def stream_paths(self, name: str) -> dict:
         """Path portion of the mediamtx URLs for this stream — the frontend
