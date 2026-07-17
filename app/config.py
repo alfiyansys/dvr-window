@@ -38,26 +38,27 @@ class Settings:
 def load_settings() -> Settings:
     raw = yaml.safe_load(CONFIG_PATH.read_text())
 
-    # Host/username/password all come from the environment, not config.yaml
-    # — none of this DVR's identifying/account info ends up in git history,
-    # only non-secret protocol config (ports) does.
-    env = {
+    # All DVR-specific config (host, ports, username, password) comes from
+    # the environment, not config.yaml — nothing identifying this specific
+    # device ends up in git history. Ports have standard defaults (80/554);
+    # host/username/password don't and must be set explicitly.
+    required = {
         "HIKVISION_HOST": os.environ.get("HIKVISION_HOST"),
         "HIKVISION_USERNAME": os.environ.get("HIKVISION_USERNAME"),
         "HIKVISION_PASSWORD": os.environ.get("HIKVISION_PASSWORD"),
     }
-    missing = [name for name, value in env.items() if not value]
+    missing = [name for name, value in required.items() if not value]
     if missing:
         raise RuntimeError(
             f"{', '.join(missing)} not set. Copy .env.example to .env and fill it in."
         )
 
     device = DeviceConfig(
-        host=env["HIKVISION_HOST"],
-        http_port=raw["device"].get("http_port", 80),
-        rtsp_port=raw["device"].get("rtsp_port", 554),
-        username=env["HIKVISION_USERNAME"],
-        password=env["HIKVISION_PASSWORD"],
+        host=required["HIKVISION_HOST"],
+        http_port=int(os.environ.get("HIKVISION_HTTP_PORT", 80)),
+        rtsp_port=int(os.environ.get("HIKVISION_RTSP_PORT", 554)),
+        username=required["HIKVISION_USERNAME"],
+        password=required["HIKVISION_PASSWORD"],
     )
     server = ServerConfig(
         host=raw["server"].get("host", "127.0.0.1"),

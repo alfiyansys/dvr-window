@@ -66,13 +66,15 @@ once.
 
 ## Secrets
 
-Never commit the DVR password, host, or username, or any file
-containing them. `.env` is gitignored and holds all three
-(`HIKVISION_HOST`/`HIKVISION_USERNAME`/`HIKVISION_PASSWORD`, see
-`.env.example`); `config.yaml` is tracked and holds only non-identifying
-protocol config (ports). See `.gitignore` before adding any new
-local/generated file that might embed credentials (mediamtx's
-generated runtime config does, for example).
+Never commit any DVR connection detail (host, ports, username,
+password) or any file containing them. `.env` is gitignored and holds
+all of it (`HIKVISION_HOST`/`HIKVISION_USERNAME`/`HIKVISION_PASSWORD`,
+plus optional `HIKVISION_HTTP_PORT`/`HIKVISION_RTSP_PORT` — see
+`.env.example`); `config.yaml` is tracked and holds only this local
+service's own bind address/port, nothing about the DVR at all. See
+`.gitignore` before adding any new local/generated file that might
+embed credentials (mediamtx's generated runtime config does, for
+example).
 
 ## Conventions
 
