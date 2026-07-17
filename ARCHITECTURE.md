@@ -139,23 +139,30 @@ DVR credentials in RTSP source URLs — must never be committed).
   without calling stop (e.g. tab closed). Fine for single-user local
   use; revisit before packaging (Phase 6).
 
-### H.265→H.264 transcode for channel 10
+### H.265→H.264 transcode for main streams
 
-Chrome can't play H.265 (see "Known device quirks and bugs"), and
-unlike the analog channels, channel 10 (IPCamera 02) has no H.264
-option to switch to at all — see "IP-proxy channels (9/10)" above.
-mediamtx can't transcode on its own, so `ch10_main`'s path has no
-direct `source`; instead it uses mediamtx's `runOnDemand` hook (`source:
-publisher`, runs only while a client is actually reading the path) to
-spawn `ffmpeg -i <DVR RTSP H.265 source> -c:v libx264 ... -f rtsp
-rtsp://127.0.0.1:8554/ch10_main` — pulling the real source and pushing
-the re-encoded stream back into the same path over mediamtx's own
-loopback RTSP re-serve (`_transcode_path` in `app/mediabridge.py`).
+Chrome can't play H.265 (see "Known device quirks and bugs"). Channel
+10 (IPCamera 02) is the concrete case on this DVR — it has no H.264
+option to switch to at all, see "IP-proxy channels (9/10)" above — but
+the detection itself is generic: `_build_paths` (`app/mediabridge.py`)
+checks each stream's own reported codec (`stream["codec"] ==
+"H.265"`), not a hardcoded channel name, so this applies to whatever
+channel(s) happen to need it on whatever DVR is configured, not just
+channel 10 on this one.
 
-Scoped to just this one stream (`TRANSCODE_TO_H264 = {"ch10_main"}`),
-not generalized to every H.265 stream: the live-view frontend only
-ever requests each channel's `main` stream, so the analog channels'
-H.265 sub-streams (never requested by the UI) don't need transcoding.
+mediamtx can't transcode on its own, so a stream needing this has no
+direct `source`; instead its path uses mediamtx's `runOnDemand` hook
+(`source: publisher`, runs only while a client is actually reading the
+path) to spawn `ffmpeg -i <DVR RTSP H.265 source> -c:v libx264 ... -f
+rtsp rtsp://127.0.0.1:8554/<name>` — pulling the real source and
+pushing the re-encoded stream back into the same path over mediamtx's
+own loopback RTSP re-serve (`_transcode_path` in `app/mediabridge.py`).
+
+Limited to `main` streams only (`name.endswith("_main")`), not every
+H.265 stream: the live-view frontend only ever requests each channel's
+`main` stream, so H.265 sub-streams (e.g. the analog channels', or
+channel 10's own sub-stream) never need transcoding since nothing ever
+requests them.
 
 Verified by extracting frames from both the raw source and the
 transcoded HLS output with `ffmpeg -frames:v 1` and comparing — same
@@ -386,7 +393,7 @@ rather than encoding the stream on its own hardware, unlike analog
 channels where the DVR *is* the encoder. Not fixable on the camera
 side either — no encoding menu in its companion app (Yoosee). Instead,
 `ch10_main` is transcoded server-side (see "H.265→H.264 transcode for
-channel 10" in the media bridge design below).
+main streams" in the media bridge design below).
 
 ## PTZ for IP-proxy channels
 

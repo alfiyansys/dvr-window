@@ -27,7 +27,7 @@ config (ports).
 ## Device state (as of 2026-07-17)
 
 - 4 active analog channels, all main streams now H.264 (2-4 were switched from H.265 manually via the DVR menu, needed for Chrome playback — see `ARCHITECTURE.md` "Known device quirks and bugs"): 1 Teras, 2 Car Port, 3 Garasi, 4 Ruang Tamu. Sub-streams may still be H.265, not yet used by the UI. Channels 5-8: no video input.
-- Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01", 10 "IPCamera 02" (each its own LAN IP, port 5000 for ONVIF — not recorded here). Channel 9's main stream is H.264 (browser-playable). Channel 10's is H.265 with no H.264 option on the camera itself (not switchable from the DVR web UI or the camera's own Yoosee app) — transcoded server-side to H.264 instead, see `ARCHITECTURE.md` "H.265→H.264 transcode for channel 10".
+- Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01", 10 "IPCamera 02" (each its own LAN IP, port 5000 for ONVIF — not recorded here). Channel 9's main stream is H.264 (browser-playable). Channel 10's is H.265 with no H.264 option on the camera itself (not switchable from the DVR web UI or the camera's own Yoosee app) — transcoded server-side to H.264 instead (detected dynamically from the DVR's own reported codec, not hardcoded to this channel), see `ARCHITECTURE.md` "H.265→H.264 transcode for main streams".
 - Channels 9/10 are now PTZ-capable (new hardware, confirmed by physically observing a continuous-move command turn channel 9's camera). Analog channels 1-4 still have no PTZ hardware.
 
 ## Progress

@@ -17,18 +17,6 @@ WEBRTC_PORT = 8889
 API_PORT = 9997
 RTSP_PORT = 8554
 
-# Chrome/Chromium has no HEVC-via-MSE support (see ARCHITECTURE.md "Known
-# device quirks and bugs"). Analog channels with an H.265 main stream were
-# fixed by switching their codec on the DVR itself, but channel 10
-# (IPCamera 02, an ONVIF-proxied camera) has no H.264 option at all and its
-# encoding can't be changed from the DVR or its own app (see
-# ARCHITECTURE.md "IP-proxy channels (9/10)") — so its main stream is
-# transcoded server-side instead. Scoped to just this one stream: the
-# live-view frontend only ever requests each channel's "main" stream, so
-# transcoding is not needed for any other H.265 stream (e.g. the analog
-# channels' H.265 sub-streams, never requested by the UI).
-TRANSCODE_TO_H264 = {"ch10_main"}
-
 
 def stream_path_name(channel_id: int, stream_id: str) -> str:
     suffix = "main" if stream_id.endswith("01") else "sub"
@@ -65,7 +53,15 @@ def _build_paths(device: DeviceConfig, channels: list[dict]) -> dict:
                 f"rtsp://{device.username}:{device.password}@"
                 f"{device.host}:{device.rtsp_port}/Streaming/Channels/{stream['streamId']}"
             )
-            if name in TRANSCODE_TO_H264:
+            # Chrome/Chromium has no HEVC-via-MSE support (see
+            # ARCHITECTURE.md "Known device quirks and bugs"), so any main
+            # stream reporting H.265 needs server-side transcoding to play
+            # in the browser — detected from the DVR's own reported codec
+            # rather than a hardcoded channel, so this holds for whatever
+            # channels/DVR happen to be configured, not just this one.
+            # Limited to "main": the live-view frontend never requests a
+            # sub-stream, so there's nothing to gain transcoding those too.
+            if stream["codec"] == "H.265" and name.endswith("_main"):
                 paths[name] = _transcode_path(source, name)
             else:
                 paths[name] = {"source": source, "sourceOnDemand": True}
