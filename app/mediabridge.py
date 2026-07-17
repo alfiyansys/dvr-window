@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -16,10 +17,41 @@ WEBRTC_PORT = 8889
 API_PORT = 9997
 RTSP_PORT = 8554
 
+# Chrome/Chromium has no HEVC-via-MSE support (see ARCHITECTURE.md "Known
+# device quirks and bugs"). Analog channels with an H.265 main stream were
+# fixed by switching their codec on the DVR itself, but channel 10
+# (IPCamera 02, an ONVIF-proxied camera) has no H.264 option at all and its
+# encoding can't be changed from the DVR or its own app (see
+# ARCHITECTURE.md "IP-proxy channels (9/10)") — so its main stream is
+# transcoded server-side instead. Scoped to just this one stream: the
+# live-view frontend only ever requests each channel's "main" stream, so
+# transcoding is not needed for any other H.265 stream (e.g. the analog
+# channels' H.265 sub-streams, never requested by the UI).
+TRANSCODE_TO_H264 = {"ch10_main"}
+
 
 def stream_path_name(channel_id: int, stream_id: str) -> str:
     suffix = "main" if stream_id.endswith("01") else "sub"
     return f"ch{channel_id}_{suffix}"
+
+
+def _transcode_path(source_url: str, name: str) -> dict:
+    """mediamtx can't transcode on its own — this path has no direct
+    'source', so mediamtx instead runs ffmpeg on demand (only while a
+    client is actually reading it) to pull the H.265 RTSP source and push
+    a re-encoded H.264 stream back into this same path over its own
+    loopback RTSP server."""
+    push_url = f"rtsp://127.0.0.1:{RTSP_PORT}/{name}"
+    cmd = (
+        f"ffmpeg -rtsp_transport tcp -i {shlex.quote(source_url)} "
+        f"-c:v libx264 -preset veryfast -tune zerolatency -an "
+        f"-f rtsp {push_url}"
+    )
+    return {
+        "source": "publisher",
+        "runOnDemand": cmd,
+        "runOnDemandRestart": True,
+    }
 
 
 def _build_paths(device: DeviceConfig, channels: list[dict]) -> dict:
@@ -33,7 +65,10 @@ def _build_paths(device: DeviceConfig, channels: list[dict]) -> dict:
                 f"rtsp://{device.username}:{device.password}@"
                 f"{device.host}:{device.rtsp_port}/Streaming/Channels/{stream['streamId']}"
             )
-            paths[name] = {"source": source, "sourceOnDemand": True}
+            if name in TRANSCODE_TO_H264:
+                paths[name] = _transcode_path(source, name)
+            else:
+                paths[name] = {"source": source, "sourceOnDemand": True}
     return paths
 
 

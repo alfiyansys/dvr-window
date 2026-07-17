@@ -24,7 +24,7 @@ in a local, gitignored `.env` (`HIKVISION_PASSWORD=...`, see `.env.example`).
 ## Device state (as of 2026-07-17)
 
 - 4 active analog channels, all main streams now H.264 (2-4 were switched from H.265 manually via the DVR menu, needed for Chrome playback — see `ARCHITECTURE.md` "Known device quirks and bugs"): 1 Teras, 2 Car Port, 3 Garasi, 4 Ruang Tamu. Sub-streams may still be H.265, not yet used by the UI. Channels 5-8: no video input.
-- Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01" at `<redacted-camera-host>:5000`, 10 "IPCamera 02" at `<redacted-camera-host>:5000`. Channel 9's main stream is H.264 (browser-playable); channel 10's is H.265 (black frame in Chrome, same known quirk as the analog channels — can't fix from this read-only account). See `ARCHITECTURE.md` "IP-proxy channels (9/10)" for the app-side support and its gaps.
+- Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01" at `<redacted-camera-host>:5000`, 10 "IPCamera 02" at `<redacted-camera-host>:5000`. Channel 9's main stream is H.264 (browser-playable). Channel 10's is H.265 with no H.264 option on the camera itself (not switchable from the DVR web UI or the camera's own Yoosee app) — transcoded server-side to H.264 instead, see `ARCHITECTURE.md` "H.265→H.264 transcode for channel 10".
 - No PTZ hardware attached to any active channel — Phase 3 skipped.
 
 ## Progress

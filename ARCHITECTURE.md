@@ -135,6 +135,32 @@ DVR credentials in RTSP source URLs — must never be committed).
   without calling stop (e.g. tab closed). Fine for single-user local
   use; revisit before packaging (Phase 6).
 
+### H.265→H.264 transcode for channel 10
+
+Chrome can't play H.265 (see "Known device quirks and bugs"), and
+unlike the analog channels, channel 10 (IPCamera 02) has no H.264
+option to switch to at all — see "IP-proxy channels (9/10)" above.
+mediamtx can't transcode on its own, so `ch10_main`'s path has no
+direct `source`; instead it uses mediamtx's `runOnDemand` hook (`source:
+publisher`, runs only while a client is actually reading the path) to
+spawn `ffmpeg -i <DVR RTSP H.265 source> -c:v libx264 ... -f rtsp
+rtsp://127.0.0.1:8554/ch10_main` — pulling the real source and pushing
+the re-encoded stream back into the same path over mediamtx's own
+loopback RTSP re-serve (`_transcode_path` in `app/mediabridge.py`).
+
+Scoped to just this one stream (`TRANSCODE_TO_H264 = {"ch10_main"}`),
+not generalized to every H.265 stream: the live-view frontend only
+ever requests each channel's `main` stream, so the analog channels'
+H.265 sub-streams (never requested by the UI) don't need transcoding.
+
+Verified by extracting frames from both the raw source and the
+transcoded HLS output with `ffmpeg -frames:v 1` and comparing — same
+content, correct colors, no corruption from the re-encode. Sustained
+transcode speed measured at **~1.0-1.05x real-time** on the dev
+machine (`veryfast` libx264 preset) — keeps up, but with little CPU
+headroom; revisit the preset/resolution if this box is resource
+constrained or multiple viewers watch channel 10 concurrently.
+
 ## Clip download design
 
 `/api/download` doesn't use `ContentMgmt/download` (see ISAPI
@@ -208,6 +234,17 @@ channels 1-4 on these same endpoints):
   badXmlContent`. Not fixed — `/api/snapshot?channelId=9` currently
   surfaces this as a raw 500. Revisit if snapshot support for these
   channels is needed; no workaround found yet.
+
+Channel 10's video-encoding type (H.265) can't be switched to H.264
+from the DVR's web UI even with a full admin account — confirmed the
+field is disabled there regardless of privilege. Root cause: this
+proxy channel's `InputProxyChannel` entry has `streamType: auto`,
+meaning the DVR mirrors whatever encoding the camera itself is set to
+rather than encoding the stream on its own hardware, unlike analog
+channels where the DVR *is* the encoder. Not fixable on the camera
+side either — no encoding menu in its companion app (Yoosee). Instead,
+`ch10_main` is transcoded server-side (see "H.265→H.264 transcode for
+channel 10" in the media bridge design below).
 
 ## Known device quirks and bugs
 
