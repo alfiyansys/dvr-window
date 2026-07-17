@@ -447,6 +447,49 @@ checks. The live-view overlay (`static/index.html`) shows a D-pad +
 zoom buttons for any channel with `ptzEnabled`, using pointerdown/up to
 start/stop continuous movement (hold to move, release to stop).
 
+## Auth
+
+One shared secret (`AUTH_KEY` in `.env`) gates both layers this app
+exposes on the LAN — there's no per-user login, just a single key.
+Two layers exist because video never flows through FastAPI (see
+"Components" above): it goes DVR → mediamtx → browser directly, with
+mediamtx's HLS (`:8888`)/WebRTC (`:8889`) listeners bound on all
+interfaces. Protecting only the API would leave the actual footage
+open.
+
+- **`/api/*` (`app/main.py`)**: a single `@app.middleware("http")`
+  checks `X-Auth-Key` against `AUTH_KEY` for any path under `/api/`,
+  `401`s otherwise. Everything else (`/`, `/playback`, `/static/*`,
+  `/healthz`) stays open — no session/cookie/redirect machinery, just
+  a header check on the endpoints that actually touch the DVR.
+- **mediamtx (`app/mediabridge.py`)**: `authInternalUsers` defines a
+  fixed `viewer` user whose password is `AUTH_KEY`, granted `read`
+  only, plus a second entry exempting `127.0.0.1`/`::1` for `api` and
+  `publish` (mediamtx's own internal processes — `add_playback_path`/
+  `remove_playback_path` via the control API, and the H.265 transcode
+  ffmpeg publishing back into the RTSP re-serve — never need real
+  credentials, but `read` deliberately isn't in that exemption since
+  that's exactly what remote LAN viewers need the `viewer` credential
+  for). `authInternalUsers` **replaces** mediamtx's default user list
+  rather than merging with it — dropping the loopback-exempt entry
+  breaks the control-API calls above with `401`s. `capture_clip`'s
+  ffmpeg (which *reads* from the RTSP re-serve to build a download
+  clip) isn't loopback-exempt for `read`, so it authenticates as
+  `viewer:{AUTH_KEY}` explicitly.
+- **Frontend (`static/auth.js`)**: shared by both pages.
+  `ensureAuthKey()` shows a small login overlay if no key is cached in
+  `localStorage`, validating it immediately against `/api/device`
+  before accepting it. `authFetch()` wraps `fetch` with the
+  `X-Auth-Key` header and clears/re-prompts on a `401` — guarded so
+  concurrent requests share one re-prompt instead of each popping the
+  form independently. `hlsXhrSetup()` sets Basic Auth
+  (`viewer:{key}`) on hls.js's XHR loader.
+- **Known limitation**: the Safari-native-HLS fallback path
+  (`video.src = hlsUrl`, used when `Hls.isSupported()` is false) can't
+  attach custom headers — no XHR is involved, so that path can't carry
+  the `viewer` credential. It's already a secondary fallback, not the
+  primary playback path, so this is accepted rather than fixed.
+
 ## Known device quirks and bugs
 
 These are DVR-firmware behaviors (V4.30.300), not bugs in this

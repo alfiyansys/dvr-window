@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>DVR Window — Playback</title>
 <script src="/static/vendor/hls.min.js"></script>
+<script src="/static/auth.js"></script>
 <style>
   body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
   h1 { font-size: 18px; font-weight: 600; }
@@ -76,7 +77,7 @@ let loadedSegments = [];
 let loadedDate = null;
 
 async function loadChannels() {
-  const res = await fetch('/api/channels');
+  const res = await authFetch('/api/channels');
   channels = (await res.json()).filter(c => c.enabled);
   const sel = document.getElementById('channel');
   sel.innerHTML = channels.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
@@ -185,7 +186,7 @@ async function search() {
   const container = document.getElementById('segments');
   container.innerHTML = '<div class="empty">Searching…</div>';
 
-  const res = await fetch(`/api/recordings?channelId=${channelId}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+  const res = await authFetch(`/api/recordings?channelId=${channelId}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
   const data = await res.json();
 
   loadedSegments = data.segments;
@@ -214,7 +215,7 @@ async function stopCurrent() {
   if (continuousTimer) { clearTimeout(continuousTimer); continuousTimer = null; }
   if (currentPlaybackName) {
     try {
-      await fetch('/api/playback/stop', {
+      await authFetch('/api/playback/stop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: currentPlaybackName }),
@@ -255,7 +256,7 @@ async function startPlaybackAt(channelId, startTime, searchEndTime, activeEl) {
 
   let res;
   try {
-    res = await fetch('/api/playback/start', {
+    res = await authFetch('/api/playback/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ channelId: Number(channelId), startTime, endTime: searchEndTime }),
@@ -276,7 +277,7 @@ async function startPlaybackAt(channelId, startTime, searchEndTime, activeEl) {
 
   const video = document.getElementById('video');
   const url = `http://${location.hostname}:${hlsPort}${hlsPath}`;
-  hls = new Hls({ lowLatencyMode: false });
+  hls = new Hls({ lowLatencyMode: false, xhrSetup: hlsXhrSetup });
   hls.loadSource(url);
   hls.attachMedia(video);
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -402,7 +403,7 @@ async function downloadClip() {
   btn.textContent = 'Preparing…';
   btn.disabled = true;
   try {
-    const res = await fetch('/api/download', {
+    const res = await authFetch('/api/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ channelId: Number(currentChannelId), startTime, endTime }),
@@ -439,7 +440,7 @@ document.getElementById('date').valueAsDate = new Date();
 // session. Reads currentSeg/loadedDate fresh each time it fires.
 document.getElementById('video').addEventListener('timeupdate', updateMarker);
 
-loadChannels();
+ensureAuthKey().then(loadChannels);
 </script>
 </body>
 </html>
