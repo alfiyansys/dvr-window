@@ -66,9 +66,11 @@ once.
 
 ## Secrets
 
-Never commit the DVR password or any file containing it. `.env` is
-gitignored; `config.yaml` holds non-secret device config (host, ports,
-username) and is tracked. See `.gitignore` before adding any new
+Never commit the DVR password, host, or username, or any file
+containing them. `.env` is gitignored and holds all three
+(`HIKVISION_HOST`/`HIKVISION_USERNAME`/`HIKVISION_PASSWORD`, see
+`.env.example`); `config.yaml` is tracked and holds only non-identifying
+protocol config (ports). See `.gitignore` before adding any new
 local/generated file that might embed credentials (mediamtx's
 generated runtime config does, for example).
 

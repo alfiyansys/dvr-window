@@ -13,18 +13,21 @@ this repo.
 
 - Model: DS-7208HQHI-K1/E (Turbo HD hybrid DVR, 8 analog channels + IP channel slots), name on unit "AL-Home Net DVR"
 - Serial: E0820210814CCWRG52897731WCVU · Firmware: V4.30.300 build 210520 (encoder V5.0) · Hardware: 0xc0ec220
-- LAN IP: <redacted-dvr-host> (re-verify if unreachable)
-- ISAPI/RTSP account: `<redacted-username>` — **read/live-view only**, no privilege for config changes (`PUT` → `403 lowPrivilege`)
+- LAN IP, ISAPI/RTSP account: see local `.env` (`HIKVISION_HOST`/`HIKVISION_USERNAME`) — not recorded here, never committed
+- The ISAPI/RTSP account is **read/live-view only**, no privilege for config changes (`PUT` → `403 lowPrivilege`)
 
 ## Credentials
 
-**Never commit passwords to this repo.** Password for `<redacted-username>` goes
-in a local, gitignored `.env` (`HIKVISION_PASSWORD=...`, see `.env.example`).
+**Never commit the DVR's host, username, or password to this repo.**
+All three go in a local, gitignored `.env`
+(`HIKVISION_HOST`/`HIKVISION_USERNAME`/`HIKVISION_PASSWORD`, see
+`.env.example`) — `config.yaml` only holds non-identifying protocol
+config (ports).
 
 ## Device state (as of 2026-07-17)
 
 - 4 active analog channels, all main streams now H.264 (2-4 were switched from H.265 manually via the DVR menu, needed for Chrome playback — see `ARCHITECTURE.md` "Known device quirks and bugs"): 1 Teras, 2 Car Port, 3 Garasi, 4 Ruang Tamu. Sub-streams may still be H.265, not yet used by the UI. Channels 5-8: no video input.
-- Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01" at `<redacted-camera-host>:5000`, 10 "IPCamera 02" at `<redacted-camera-host>:5000`. Channel 9's main stream is H.264 (browser-playable). Channel 10's is H.265 with no H.264 option on the camera itself (not switchable from the DVR web UI or the camera's own Yoosee app) — transcoded server-side to H.264 instead, see `ARCHITECTURE.md` "H.265→H.264 transcode for channel 10".
+- Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01", 10 "IPCamera 02" (each its own LAN IP, port 5000 for ONVIF — not recorded here). Channel 9's main stream is H.264 (browser-playable). Channel 10's is H.265 with no H.264 option on the camera itself (not switchable from the DVR web UI or the camera's own Yoosee app) — transcoded server-side to H.264 instead, see `ARCHITECTURE.md` "H.265→H.264 transcode for channel 10".
 - Channels 9/10 are now PTZ-capable (new hardware, confirmed by physically observing a continuous-move command turn channel 9's camera). Analog channels 1-4 still have no PTZ hardware.
 
 ## Progress

@@ -414,7 +414,7 @@ documented ISAPI convention (positive tilt up, positive zoom in) but
 haven't been independently verified the same way.
 
 Separately, both cameras were probed directly over ONVIF
-(`GetCapabilities` against `http://192.168.25.20{1,2}:5000/onvif/device_service`,
+(`GetCapabilities` against `http://<camera-ip>:5000/onvif/device_service`,
 no auth needed for this call) — they do advertise a PTZ service, at
 `.../onvif/deviceio_service`. Not used by this project (the DVR
 relay above works and needs no camera credentials, which we don't

@@ -1,12 +1,12 @@
-# Non-secret device/server configuration. The DVR password is NOT stored
-# here — it's read from the HIKVISION_PASSWORD environment variable
-# (see .env.example) so it never ends up in git history.
+# Non-identifying device/server configuration (ports only). The DVR's
+# host, username, and password are NOT stored here — they're read from
+# HIKVISION_HOST/HIKVISION_USERNAME/HIKVISION_PASSWORD environment
+# variables (see .env.example) so nothing identifying this specific
+# device ends up in git history.
 
 device:
-  host: <redacted-dvr-host>
   http_port: 80
   rtsp_port: 554
-  username: <redacted-username>
 
 server:
   host: 127.0.0.1
