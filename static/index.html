@@ -31,13 +31,20 @@
   .ptz button { padding: 0; font-size: 16px; user-select: none; }
   .ptz .zoom { display: flex; gap: 8px; justify-content: center; padding: 0 12px 10px; }
 
+  /* Short viewport (mobile landscape): the video competes with the label
+     + PTZ pad + zoom row for the scarce dimension (height) when they're
+     stacked. Switching to a side-by-side layout lets the video use the
+     full available height instead, since controls now take from the
+     abundant dimension (width) instead. */
   @media (max-height: 500px) {
     .overlay { padding: 8px; }
-    .overlay-box { max-height: calc(100vh - 16px); }
-    .overlay-box video { max-height: 38vh; }
-    .overlay-box .label { padding: 4px 12px; }
-    .ptz { grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); gap: 3px; padding: 6px 12px; }
-    .ptz .zoom { padding: 0 12px 6px; }
+    .overlay-box { max-height: calc(100vh - 16px); display: flex; flex-direction: row; }
+    .overlay-video-col { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .overlay-box video { max-height: 100%; max-width: 100%; width: auto; }
+    .overlay-side { width: 160px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px; overflow-y: auto; border-left: 1px solid #333; }
+    .overlay-side .label { flex-direction: column; align-items: stretch; padding: 0; gap: 6px; }
+    .overlay-side .label .actions { flex-direction: column; }
+    .ptz { padding: 4px 0; }
   }
 </style>
 </head>
@@ -48,22 +55,26 @@
 
 <div id="overlay" class="overlay">
   <div class="overlay-box">
-    <div id="overlaySlot"></div>
-    <div class="label">
-      <span id="overlayName"></span>
-      <div class="actions">
-        <button id="overlaySnapshot">Snapshot 📷</button>
-        <button id="overlayClose">Tutup ✕</button>
+    <div class="overlay-video-col">
+      <div id="overlaySlot"></div>
+    </div>
+    <div class="overlay-side">
+      <div class="label">
+        <span id="overlayName"></span>
+        <div class="actions">
+          <button id="overlaySnapshot">Snapshot 📷</button>
+          <button id="overlayClose">Tutup ✕</button>
+        </div>
       </div>
-    </div>
-    <div id="ptzPad" class="ptz">
-      <span></span><button data-pan="0" data-tilt="50">&uarr;</button><span></span>
-      <button data-pan="-50" data-tilt="0">&larr;</button><span></span><button data-pan="50" data-tilt="0">&rarr;</button>
-      <span></span><button data-pan="0" data-tilt="-50">&darr;</button><span></span>
-    </div>
-    <div id="ptzZoom" class="ptz zoom" style="grid-template-columns:none;display:none;">
-      <button data-zoom="50">Zoom +</button>
-      <button data-zoom="-50">Zoom &minus;</button>
+      <div id="ptzPad" class="ptz">
+        <span></span><button data-pan="0" data-tilt="50">&uarr;</button><span></span>
+        <button data-pan="-50" data-tilt="0">&larr;</button><span></span><button data-pan="50" data-tilt="0">&rarr;</button>
+        <span></span><button data-pan="0" data-tilt="-50">&darr;</button><span></span>
+      </div>
+      <div id="ptzZoom" class="ptz zoom" style="grid-template-columns:none;display:none;">
+        <button data-zoom="50">Zoom +</button>
+        <button data-zoom="-50">Zoom &minus;</button>
+      </div>
     </div>
   </div>
 </div>
