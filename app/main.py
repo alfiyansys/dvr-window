@@ -44,6 +44,11 @@ app = FastAPI(title="dvr-window", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+@app.get("/")
+def index():
+    return FileResponse("static/index.html")
+
+
 def _streams_for_channel(streaming_channels: list[dict], match_key: str, channel_id: int) -> list[dict]:
     return [
         {
