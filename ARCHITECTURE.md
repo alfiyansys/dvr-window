@@ -115,7 +115,11 @@ of writing our own RTSP-to-browser transcoder.
 mediamtx is spawned as a child process by the backend (`MediaBridge` in
 `app/mediabridge.py`). Its YAML config is generated at startup from the
 live channel list and written to a gitignored runtime path (it embeds
-DVR credentials in RTSP source URLs — must never be committed).
+DVR credentials in RTSP source URLs — must never be committed). The
+four ports below are this sidecar's own local listeners, not DVR
+config — defaults shown, overridable via `MEDIAMTX_HLS_PORT`/
+`MEDIAMTX_WEBRTC_PORT`/`MEDIAMTX_API_PORT`/`MEDIAMTX_RTSP_PORT` (see
+`.env.example`) in case one conflicts with something else on the host.
 
 - **Live channels**: one static mediamtx path per stream
   (`ch{id}_main`/`ch{id}_sub`), `sourceOnDemand: true` so the DVR isn't

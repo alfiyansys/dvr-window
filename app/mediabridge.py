@@ -1,3 +1,4 @@
+import os
 import shlex
 import subprocess
 import time
@@ -12,10 +13,15 @@ MEDIAMTX_DIR = Path(__file__).resolve().parent.parent / "mediamtx"
 MEDIAMTX_BIN = MEDIAMTX_DIR / "mediamtx"
 RUNTIME_CONFIG_PATH = MEDIAMTX_DIR / "runtime.yml"
 
-HLS_PORT = 8888
-WEBRTC_PORT = 8889
-API_PORT = 9997
-RTSP_PORT = 8554
+# This mediamtx sidecar's own local listener ports — not DVR config, just
+# where this local service happens to expose HLS/WebRTC/its control API/
+# the RTSP re-serve. Configurable in case one of these conflicts with
+# something else already running on the host; defaults match what this
+# project has always used.
+HLS_PORT = int(os.environ.get("MEDIAMTX_HLS_PORT", 8888))
+WEBRTC_PORT = int(os.environ.get("MEDIAMTX_WEBRTC_PORT", 8889))
+API_PORT = int(os.environ.get("MEDIAMTX_API_PORT", 9997))
+RTSP_PORT = int(os.environ.get("MEDIAMTX_RTSP_PORT", 8554))
 
 
 def stream_path_name(channel_id: int, stream_id: str) -> str:
@@ -91,6 +97,11 @@ class MediaBridge:
             "moq": False,
             "api": True,
             "apiAddress": f"127.0.0.1:{API_PORT}",
+            # HLS/WebRTC bind on all interfaces (no host prefix), unlike
+            # the two above — the browser (possibly from elsewhere on the
+            # LAN) needs to reach these directly, not just this host.
+            "hlsAddress": f":{HLS_PORT}",
+            "webrtcAddress": f":{WEBRTC_PORT}",
             "paths": paths,
         }
         RUNTIME_CONFIG_PATH.write_text(yaml.safe_dump(config))

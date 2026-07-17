@@ -20,13 +20,18 @@ This box has no system `pip`/`ensurepip` — bootstrap it manually:
 python3 -m venv .venv --without-pip
 curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env   # fill in HIKVISION_PASSWORD — never commit the real value
+cp .env.example .env   # fill in HIKVISION_HOST/HIKVISION_USERNAME/HIKVISION_PASSWORD — never commit the real values
 ```
 
 mediamtx (the RTSP-to-browser media bridge) must be present at
 `mediamtx/mediamtx` — download the `linux_amd64` release binary from
 https://github.com/bluenviron/mediamtx/releases if it isn't already
 there (it's gitignored, not vendored in the repo).
+
+All DVR ports (`HIKVISION_HTTP_PORT`/`HIKVISION_RTSP_PORT`) and this
+sidecar's own local ports (`MEDIAMTX_HLS_PORT`/`MEDIAMTX_WEBRTC_PORT`/
+`MEDIAMTX_API_PORT`/`MEDIAMTX_RTSP_PORT`) are optional in `.env` — only
+set them if a default conflicts with something.
 
 ## Run
 
@@ -35,8 +40,7 @@ there (it's gitignored, not vendored in the repo).
 ```
 
 This also spawns mediamtx as a child process. Live view:
-`http://127.0.0.1:8896/static/index.html`; playback:
-`http://127.0.0.1:8896/static/playback.html`.
+`http://127.0.0.1:8896/`; playback: `http://127.0.0.1:8896/playback`.
 
 ## No automated test suite
 
