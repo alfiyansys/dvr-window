@@ -86,11 +86,15 @@ of writing our own RTSP-to-browser transcoder.
 - `CMSearch` matches return a segment's **own full start/end** in their
   `playbackURI`, not whatever time window was searched for — a search
   scoped to a 20-second window still returned a segment spanning 27
-  minutes, with `starttime` at the segment's own beginning. Fine for
-  "play this whole segment" (Phase 4), but for a precise clip (Phase 5
-  download) the match's `name`/`size` tokens must be kept (they
-  identify which stored file to read) while `starttime`/`endtime` are
-  overwritten with what was actually requested.
+  minutes, with `starttime` at the segment's own beginning. Both
+  `/api/playback/start` and `/api/download` correct for this the same
+  way (`_rewrite_playback_window` in `app/main.py`): the match's
+  `name`/`size` tokens must be kept (they identify which stored file to
+  read) while `starttime` is overwritten with what was actually
+  requested — otherwise playback always starts from the segment's own
+  beginning regardless of the caller's requested time (this is what
+  makes "jump to time" and "click a segment mid-way through" actually
+  seek there instead of replaying from the start).
 - `ContentMgmt/download` (`POST /ISAPI/ContentMgmt/download`, tried
   during Phase 5) **ignores `starttime`/`endtime` entirely** and
   streams the whole segment file (~1GB for a ~1.5 hour segment on this

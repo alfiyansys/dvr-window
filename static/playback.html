@@ -31,6 +31,9 @@
   <select id="channel"></select>
   <input type="date" id="date">
   <button id="searchBtn">Cari rekaman</button>
+  <span style="color:#555">|</span>
+  <input type="datetime-local" id="jumpDatetime" step="1">
+  <button id="jumpBtn">Lompat ke waktu</button>
 </div>
 
 <div class="layout">
@@ -129,21 +132,28 @@ async function stopCurrent() {
   currentSeg = null;
 }
 
-async function play(channelId, seg, el) {
+// Shared by both "click a segment" and "jump to time": starts playback at
+// an exact startTime (the backend now seeks there — see main.py
+// start_playback — rather than always playing from the segment's own
+// beginning). `searchEndTime` is just a loose upper bound CMSearch uses to
+// locate the covering segment; playback itself runs to that segment's
+// real end, not this value (see ARCHITECTURE.md).
+async function startPlaybackAt(channelId, startTime, searchEndTime, labelText, activeEl) {
   await stopCurrent();
   document.querySelectorAll('.segment.active').forEach(e => e.classList.remove('active'));
-  el.classList.add('active');
+  if (activeEl) activeEl.classList.add('active');
   document.getElementById('playerLabel').textContent = 'memuat…';
   currentChannelId = channelId;
-  currentSeg = seg;
+  currentSeg = { startTime, endTime: searchEndTime };
 
   const res = await fetch('/api/playback/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channelId: Number(channelId), startTime: seg.startTime, endTime: seg.endTime }),
+    body: JSON.stringify({ channelId: Number(channelId), startTime, endTime: searchEndTime }),
   });
   if (!res.ok) {
-    document.getElementById('playerLabel').textContent = 'gagal memulai playback';
+    const err = await res.json().catch(() => ({}));
+    document.getElementById('playerLabel').textContent = err.detail || 'gagal memulai playback';
     return;
   }
   const { name, hlsPath, hlsPort } = await res.json();
@@ -156,16 +166,29 @@ async function play(channelId, seg, el) {
   hls.attachMedia(video);
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
     video.play();
-    document.getElementById('playerLabel').textContent = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
+    document.getElementById('playerLabel').textContent = labelText;
     document.getElementById('downloadControls').style.display = 'inline-flex';
-    // Default clip window: segment start, +30s — same duration heuristic
+    // Default clip window: requested start, +30s — same duration heuristic
     // as before, just expressed as an editable end time instead of a
     // fixed "duration" input, so the actual clip range can be adjusted
-    // to any time within the segment (e.g. 07:00:00–07:00:30).
-    const defaultEnd = new Date(new Date(seg.startTime).getTime() + 30000).toISOString();
-    document.getElementById('downloadStart').value = hms(seg.startTime);
+    // to any time (e.g. 07:00:00–07:00:30).
+    const defaultEnd = new Date(new Date(startTime).getTime() + 30000).toISOString();
+    document.getElementById('downloadStart').value = hms(startTime);
     document.getElementById('downloadEnd').value = hms(defaultEnd);
   });
+}
+
+async function play(channelId, seg, el) {
+  await startPlaybackAt(channelId, seg.startTime, seg.endTime, `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`, el);
+}
+
+async function jumpToTime() {
+  const channelId = document.getElementById('channel').value;
+  const dt = document.getElementById('jumpDatetime').value; // "YYYY-MM-DDTHH:MM[:SS]"
+  if (!dt) { alert('Isi tanggal & waktu dulu'); return; }
+  const startTime = `${dt.length === 16 ? dt + ':00' : dt}Z`;
+  const endTime = `${startTime.slice(0, 10)}T23:59:59Z`;
+  await startPlaybackAt(channelId, startTime, endTime, `Lompat ke ${fmtTime(startTime)}`, null);
 }
 
 async function downloadClip() {
@@ -214,6 +237,7 @@ async function downloadClip() {
 }
 
 document.getElementById('searchBtn').onclick = search;
+document.getElementById('jumpBtn').onclick = jumpToTime;
 document.getElementById('stopBtn').onclick = stopCurrent;
 document.getElementById('downloadBtn').onclick = downloadClip;
 document.getElementById('date').valueAsDate = new Date();

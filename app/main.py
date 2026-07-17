@@ -242,7 +242,16 @@ def start_playback(req: PlaybackStartRequest):
     if not matches:
         raise HTTPException(status_code=404, detail="No recording found for that time range")
 
-    playback_uri = matches[0]["playbackURI"]
+    # Same as /api/download: a match's playbackURI carries the segment's
+    # own full start/end, not the caller's requested window (see
+    # _rewrite_playback_window and ARCHITECTURE.md) — rewrite starttime to
+    # the caller's actual requested time so playback (e.g. "jump to time")
+    # seeks there instead of always starting from the segment's beginning.
+    # Keep the segment's own endTime rather than the caller's (which may
+    # just be a loose upper bound used to locate the segment, e.g. "jump
+    # to time" passes end-of-day) so playback runs to the segment's real end.
+    match = matches[0]
+    playback_uri = _rewrite_playback_window(match["playbackURI"], req.startTime, match["endTime"])
     device = settings.device
     source_url = playback_uri.replace(
         "rtsp://", f"rtsp://{device.username}:{device.password}@", 1
