@@ -72,13 +72,15 @@ once.
 
 Never commit any DVR connection detail (host, ports, username,
 password) or any file containing them. `.env` is gitignored and holds
-all of it (`HIKVISION_HOST`/`HIKVISION_USERNAME`/`HIKVISION_PASSWORD`,
-plus optional `HIKVISION_HTTP_PORT`/`HIKVISION_RTSP_PORT` — see
-`.env.example`); `config.yaml` is tracked and holds only this local
-service's own bind address/port, nothing about the DVR at all. See
-`.gitignore` before adding any new local/generated file that might
-embed credentials (mediamtx's generated runtime config does, for
-example).
+all config now — DVR (`HIKVISION_HOST`/`HIKVISION_USERNAME`/
+`HIKVISION_PASSWORD`, plus optional `HIKVISION_HTTP_PORT`/
+`HIKVISION_RTSP_PORT`), this app's mediamtx sidecar
+(`MEDIAMTX_HLS_PORT`/`MEDIAMTX_WEBRTC_PORT`/`MEDIAMTX_API_PORT`/
+`MEDIAMTX_RTSP_PORT`), and this local service's own bind address
+(`SERVER_HOST`/`SERVER_PORT`) — see `.env.example`. There's no tracked
+config file at all anymore. See `.gitignore` before adding any new
+local/generated file that might embed credentials (mediamtx's
+generated runtime config does, for example).
 
 ## Conventions
 

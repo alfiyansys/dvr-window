@@ -1,7 +1,0 @@
-# This local service's own bind address/port — not DVR configuration.
-# All DVR connection settings (host, ports, username, password) come from
-# environment variables instead, see .env.example.
-
-server:
-  host: 127.0.0.1
-  port: 8896

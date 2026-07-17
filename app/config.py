@@ -1,13 +1,9 @@
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
-import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
-
-CONFIG_PATH = Path(os.environ.get("HIKVISION_CONFIG", "config.yaml"))
 
 
 @dataclass(frozen=True)
@@ -36,12 +32,11 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    raw = yaml.safe_load(CONFIG_PATH.read_text())
-
-    # All DVR-specific config (host, ports, username, password) comes from
-    # the environment, not config.yaml — nothing identifying this specific
-    # device ends up in git history. Ports have standard defaults (80/554);
-    # host/username/password don't and must be set explicitly.
+    # All config comes from the environment now, not any tracked file —
+    # nothing identifying this specific device (or even this local
+    # service's own bind address) ends up in git history. Ports have
+    # standard defaults; host/username/password don't and must be set
+    # explicitly.
     required = {
         "HIKVISION_HOST": os.environ.get("HIKVISION_HOST"),
         "HIKVISION_USERNAME": os.environ.get("HIKVISION_USERNAME"),
@@ -61,7 +56,7 @@ def load_settings() -> Settings:
         password=required["HIKVISION_PASSWORD"],
     )
     server = ServerConfig(
-        host=raw["server"].get("host", "127.0.0.1"),
-        port=raw["server"].get("port", 8896),
+        host=os.environ.get("SERVER_HOST", "127.0.0.1"),
+        port=int(os.environ.get("SERVER_PORT", 8896)),
     )
     return Settings(device=device, server=server)

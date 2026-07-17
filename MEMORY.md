@@ -19,10 +19,9 @@ this repo.
 ## Credentials
 
 **Never commit the DVR's host, username, or password to this repo.**
-All three go in a local, gitignored `.env`
-(`HIKVISION_HOST`/`HIKVISION_USERNAME`/`HIKVISION_PASSWORD`, see
-`.env.example`) — `config.yaml` only holds non-identifying protocol
-config (ports).
+All config — DVR, mediamtx sidecar ports, this local service's own
+bind address — lives in a local, gitignored `.env` now (see
+`.env.example`). There's no tracked config file at all.
 
 ## Device state (as of 2026-07-17)
 
