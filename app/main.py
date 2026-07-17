@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from app.config import load_settings
@@ -95,7 +95,14 @@ def _build_ip_channel(isapi: ISAPIClient, proxy_channel: dict, streaming_channel
     channel_id = int(proxy_channel["id"])
     streams = _streams_for_channel(streaming_channels, "dynVideoInputChannelID", channel_id)
     enabled = len(streams) > 0
-    ptz = _build_ptz(isapi, channel_id) if enabled else None
+    # get_ptz_capabilities always returns None for these channels (the DVR
+    # rejects that specific endpoint for proxy-channel IDs), but the DVR
+    # does proxy real PTZ *control* for them — confirmed by physically
+    # observing a continuous-move command turn the camera (channel 9). Not
+    # independently re-verified per-channel; assumed true for any enabled
+    # proxy channel since it's the same ISAPI mechanism. See
+    # ARCHITECTURE.md "PTZ for IP-proxy channels".
+    ptz = {"enabled": True, "controlProtocol": "ONVIF"} if enabled else None
 
     return {
         "id": channel_id,
@@ -137,13 +144,38 @@ def get_streams():
                 "hlsPath": bridge.stream_paths(name)["hlsPath"],
                 "webrtcPath": bridge.stream_paths(name)["webrtcPath"],
             })
-        channels.append({"id": channel["id"], "name": channel["name"], "streams": streams})
+        channels.append({
+            "id": channel["id"],
+            "name": channel["name"],
+            "streams": streams,
+            "ptzEnabled": channel["ptz"]["enabled"] if channel["ptz"] else False,
+        })
 
     return {"hlsPort": HLS_PORT, "webrtcPort": WEBRTC_PORT, "channels": channels}
 
 
 def _main_track_id(channel_id: int) -> int:
     return channel_id * 100 + 1
+
+
+class PTZMoveRequest(BaseModel):
+    pan: int = Field(0, ge=-100, le=100)
+    tilt: int = Field(0, ge=-100, le=100)
+    zoom: int = Field(0, ge=-100, le=100)
+
+
+@app.put("/api/ptz/{channel_id}/continuous")
+def ptz_continuous(channel_id: int, req: PTZMoveRequest):
+    isapi: ISAPIClient = app.state.isapi
+    isapi.ptz_continuous_move(channel_id, req.pan, req.tilt, req.zoom)
+    return {"status": "ok"}
+
+
+@app.put("/api/ptz/{channel_id}/stop")
+def ptz_stop(channel_id: int):
+    isapi: ISAPIClient = app.state.isapi
+    isapi.ptz_stop(channel_id)
+    return {"status": "ok"}
 
 
 def _to_dvr_compact(iso: str) -> str:

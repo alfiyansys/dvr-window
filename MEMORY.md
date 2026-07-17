@@ -25,13 +25,13 @@ in a local, gitignored `.env` (`HIKVISION_PASSWORD=...`, see `.env.example`).
 
 - 4 active analog channels, all main streams now H.264 (2-4 were switched from H.265 manually via the DVR menu, needed for Chrome playback — see `ARCHITECTURE.md` "Known device quirks and bugs"): 1 Teras, 2 Car Port, 3 Garasi, 4 Ruang Tamu. Sub-streams may still be H.265, not yet used by the UI. Channels 5-8: no video input.
 - Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01" at `<redacted-camera-host>:5000`, 10 "IPCamera 02" at `<redacted-camera-host>:5000`. Channel 9's main stream is H.264 (browser-playable). Channel 10's is H.265 with no H.264 option on the camera itself (not switchable from the DVR web UI or the camera's own Yoosee app) — transcoded server-side to H.264 instead, see `ARCHITECTURE.md` "H.265→H.264 transcode for channel 10".
-- No PTZ hardware attached to any active channel — Phase 3 skipped.
+- Channels 9/10 are now PTZ-capable (new hardware, confirmed by physically observing a continuous-move command turn channel 9's camera). Analog channels 1-4 still have no PTZ hardware.
 
 ## Progress
 
 - [x] Phase 0 (device recon), 1 (backend core), 2 (live view), 4 (playback & search), 5 (snapshot & download) — see `PLAN.md` Milestones table for details.
 - [x] Channels 9/10 (IP-proxy) support added to `/api/channels` and the live-view media bridge — 2026-07-17.
-- [~] Phase 3 (PTZ) — skipped, no hardware to support it.
+- [x] Phase 3 (PTZ) — done for channels 9/10 via `/api/ptz/{channelId}/{continuous,stop}`, see `ARCHITECTURE.md` "PTZ for IP-proxy channels". Analog channels 1-4 still have no PTZ hardware to support it.
 - [ ] Phase 6 (packaging) — next up.
 - [ ] Snapshot for channels 9/10 is broken on this firmware (`400 badXmlContent` from `/ISAPI/Streaming/channels/90x/picture`) — not fixed, see `ARCHITECTURE.md`.
 

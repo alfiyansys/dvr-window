@@ -8,7 +8,7 @@ credentials pointer are in `MEMORY.md`.
 
 A **standalone Linux service + local web UI** replacing Windows'
 closed-source `LocalServiceControl.exe` local-service plugin — live
-view, playback, snapshot, download — built entirely on Hikvision's
+view, playback, snapshot, download, PTZ — built entirely on Hikvision's
 documented, open protocols (ISAPI + RTSP), not any closed-source SDK.
 Rationale in `ARCHITECTURE.md`.
 
@@ -19,7 +19,7 @@ Rationale in `ARCHITECTURE.md`.
 | 0 | ✅ done | Device recon — confirm ISAPI/RTSP paths, auth, channel/PTZ capability against the physical DVR |
 | 1 | ✅ done | Backend core — config, ISAPI client, `/api/channels` |
 | 2 | ✅ done | Live view — mediamtx bridge, `/api/streams`, live grid UI |
-| 3 | ⬜ skipped | PTZ — no PTZ hardware attached to any active channel; revisit only if that changes |
+| 3 | ✅ done | PTZ — channels 9/10 (IP-proxy cameras) got PTZ hardware; `/api/ptz/{channelId}/{continuous,stop}` + live-view D-pad. Analog channels 1-4 still have no PTZ hardware. |
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
 | 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
 | 6 | ⬜ next | Polish/packaging — systemd service, playback-path GC, event/alarm stream, basic auth on the local UI |

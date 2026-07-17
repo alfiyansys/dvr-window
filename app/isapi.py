@@ -68,13 +68,37 @@ class ISAPIClient:
             return data["PTZChannelCap"]
         except httpx.HTTPStatusError as exc:
             # 404: no PTZ endpoint for this channel at all. 400/badXmlContent:
-            # IP-proxy channels (9/10 on this DVR) use a different channel-ID
-            # scheme than PTZCtrl expects — PTZ is out of scope for this
-            # project anyway (see PLAN.md, Phase 3 skipped), so treat the
-            # same as "no PTZ" rather than raise.
+            # IP-proxy channels (9/10 on this DVR) reject this specific
+            # endpoint with an unhelpful error even though the DVR does
+            # proxy real PTZ *control* for them (confirmed by physically
+            # observing a continuous-move command turn the camera — see
+            # ARCHITECTURE.md "PTZ for IP-proxy channels"). Treated as "no
+            # PTZ" here since this method only reports capabilities.
             if exc.response.status_code in (404, 400):
                 return None
             raise
+
+    def ptz_continuous_move(self, channel_id: int, pan: int, tilt: int, zoom: int) -> None:
+        """Speeds are -100..100 (ISAPI convention). Confirmed empirically
+        (physical camera observation, not just the DVR's response) that
+        positive pan turns the camera right, for a proxied ONVIF channel —
+        see ARCHITECTURE.md. Tilt/zoom sign follow the same documented
+        ISAPI convention but haven't been independently verified."""
+        body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<PTZData>
+<pan>{pan}</pan>
+<tilt>{tilt}</tilt>
+<zoom>{zoom}</zoom>
+</PTZData>"""
+        resp = self._client.put(
+            f"/ISAPI/PTZCtrl/channels/{channel_id}/continuous",
+            content=body,
+            headers={"Content-Type": "application/xml"},
+        )
+        resp.raise_for_status()
+
+    def ptz_stop(self, channel_id: int) -> None:
+        self.ptz_continuous_move(channel_id, 0, 0, 0)
 
     def _search_recordings_page(self, search_id: str, track_id: int, start_time: str, end_time: str, max_results: int) -> dict:
         body = f"""<?xml version="1.0" encoding="UTF-8"?>

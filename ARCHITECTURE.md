@@ -227,9 +227,10 @@ account-privilege related — same read-only account works fine for
 channels 1-4 on these same endpoints):
 
 - **PTZ capabilities** (`/ISAPI/PTZCtrl/channels/9/capabilities`) →
-  `400 badXmlContent`, not `404`. Since PTZ is already out of scope
-  (Phase 3 skipped), `get_ptz_capabilities` treats this the same as
-  "no PTZ" rather than raising.
+  `400 badXmlContent`, not `404`. `get_ptz_capabilities` treats this
+  the same as "no PTZ" rather than raising — but PTZ *control* for
+  these channels works via a different endpoint anyway, see "PTZ for
+  IP-proxy channels" below.
 - **Snapshot** (`/ISAPI/Streaming/channels/901/picture`) → same `400
   badXmlContent`. Not fixed — `/api/snapshot?channelId=9` currently
   surfaces this as a raw 500. Revisit if snapshot support for these
@@ -245,6 +246,54 @@ channels where the DVR *is* the encoder. Not fixable on the camera
 side either — no encoding menu in its companion app (Yoosee). Instead,
 `ch10_main` is transcoded server-side (see "H.265→H.264 transcode for
 channel 10" in the media bridge design below).
+
+## PTZ for IP-proxy channels
+
+Channels 9/10 got PTZ-capable cameras. The DVR's PTZ subsystem doesn't
+model them at all, though — `/ISAPI/PTZCtrl/channels` (the full list,
+no ID filter) only ever returns entries for the 4 analog channels.
+Querying channel 9 directly is inconsistent: `capabilities` and
+`status` both fail (`400`/`403`), but `presets` succeeds (returns an
+empty list) — and, surprisingly, actually issuing a **continuous move**
+command (`PUT /ISAPI/PTZCtrl/channels/9/continuous`) returns `200 OK`
+*and* really moves the camera. This was confirmed by direct physical
+observation (not just trusting the DVR's response, per this project's
+usual verification standard) — an initial frame-comparison check
+looked identical before/after, but that was almost certainly a false
+negative from a low-texture scene, not a real absence of movement.
+
+So: don't trust `/capabilities` or `/status` for these channels — they
+don't reflect what `/continuous` can actually do. `_build_ip_channel`
+(`app/main.py`) hardcodes `ptz.enabled = true` for any enabled
+IP-proxy channel rather than relying on the broken capabilities check.
+
+Sign convention: **positive `pan` turns the camera right**, confirmed
+by observation for channel 9. Tilt/zoom sign follow the same
+documented ISAPI convention (positive tilt up, positive zoom in) but
+haven't been independently verified the same way.
+
+Separately, both cameras were probed directly over ONVIF
+(`GetCapabilities` against `http://192.168.25.20{1,2}:5000/onvif/device_service`,
+no auth needed for this call) — they do advertise a PTZ service, at
+`.../onvif/deviceio_service`. Not used by this project (the DVR
+relay above works and needs no camera credentials, which we don't
+have), but noted here since it confirms these are genuinely
+PTZ-capable devices, not just a DVR fluke. That same probe also
+turned up a device quirk worth flagging: the `DeviceIO` extension in
+the capabilities response advertises a stale internal XAddr
+(`http://192.168.1.33:5000/...`) instead of the camera's real
+reachable IP — leftover config from before the camera moved onto this
+subnet. Not relevant to PTZ, but a trap for any ONVIF client that
+blindly follows advertised XAddrs instead of the known camera IP.
+
+**API**: `PUT /api/ptz/{channelId}/continuous` (body: `pan`/`tilt`/`zoom`,
+each -100..100) and `PUT /api/ptz/{channelId}/stop` — both just proxy
+straight to the DVR's own endpoint (`ISAPIClient.ptz_continuous_move`/
+`ptz_stop` in `app/isapi.py`), no special handling needed since the DVR
+already does the right thing once you skip the broken capability
+checks. The live-view overlay (`static/index.html`) shows a D-pad +
+zoom buttons for any channel with `ptzEnabled`, using pointerdown/up to
+start/stop continuous movement (hold to move, release to stop).
 
 ## Known device quirks and bugs
 

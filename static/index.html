@@ -25,6 +25,11 @@
   .overlay-box .label .actions { display: flex; gap: 8px; }
   .overlay-box button { cursor: pointer; color: #aaa; font-size: 14px; background: #1c1c1c; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; }
   .overlay-box button:hover { background: #2a2a2a; color: #eee; }
+
+  .ptz { display: none; grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); gap: 4px; padding: 10px 12px; justify-content: center; }
+  .ptz.open { display: grid; }
+  .ptz button { padding: 0; font-size: 16px; user-select: none; }
+  .ptz .zoom { display: flex; gap: 8px; justify-content: center; padding: 0 12px 10px; }
 </style>
 </head>
 <body>
@@ -42,13 +47,22 @@
         <button id="overlayClose">Tutup ✕</button>
       </div>
     </div>
+    <div id="ptzPad" class="ptz">
+      <span></span><button data-pan="0" data-tilt="50">&uarr;</button><span></span>
+      <button data-pan="-50" data-tilt="0">&larr;</button><span></span><button data-pan="50" data-tilt="0">&rarr;</button>
+      <span></span><button data-pan="0" data-tilt="-50">&darr;</button><span></span>
+    </div>
+    <div id="ptzZoom" class="ptz zoom" style="grid-template-columns:none;display:none;">
+      <button data-zoom="50">Zoom +</button>
+      <button data-zoom="-50">Zoom &minus;</button>
+    </div>
   </div>
 </div>
 
 <script>
 let overlayChannelId = null;
 
-function openOverlay(cell, name, channelId) {
+function openOverlay(cell, name, channelId, ptzEnabled) {
   const slot = document.getElementById('overlaySlot');
   const video = cell.querySelector('video');
   cell.dataset.videoHome = '1';
@@ -57,6 +71,40 @@ function openOverlay(cell, name, channelId) {
   document.getElementById('overlayName').textContent = name;
   overlayChannelId = channelId;
   document.getElementById('overlay').classList.add('open');
+  document.getElementById('ptzPad').classList.toggle('open', !!ptzEnabled);
+  document.getElementById('ptzZoom').style.display = ptzEnabled ? 'flex' : 'none';
+}
+
+// PTZ is continuous-move: hold to move, release to stop (see
+// ARCHITECTURE.md "PTZ for IP-proxy channels" — only pan-right was
+// physically confirmed to move the camera; other directions follow the
+// same documented ISAPI sign convention but aren't independently verified).
+function ptzSend(pan, tilt, zoom) {
+  if (overlayChannelId == null) return;
+  fetch(`/api/ptz/${overlayChannelId}/continuous`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pan, tilt, zoom }),
+  });
+}
+
+function ptzStop() {
+  if (overlayChannelId == null) return;
+  fetch(`/api/ptz/${overlayChannelId}/stop`, { method: 'PUT' });
+}
+
+for (const btn of document.querySelectorAll('#ptzPad button')) {
+  const pan = Number(btn.dataset.pan);
+  const tilt = Number(btn.dataset.tilt);
+  btn.addEventListener('pointerdown', () => ptzSend(pan, tilt, 0));
+  btn.addEventListener('pointerup', ptzStop);
+  btn.addEventListener('pointerleave', ptzStop);
+}
+for (const btn of document.querySelectorAll('#ptzZoom button')) {
+  const zoom = Number(btn.dataset.zoom);
+  btn.addEventListener('pointerdown', () => ptzSend(0, 0, zoom));
+  btn.addEventListener('pointerup', ptzStop);
+  btn.addEventListener('pointerleave', ptzStop);
 }
 
 document.getElementById('overlaySnapshot').onclick = () => {
@@ -73,6 +121,7 @@ function closeOverlay() {
   if (video && video._homeCell) {
     video._homeCell.insertBefore(video, video._homeCell.firstChild);
   }
+  ptzStop();
   document.getElementById('overlay').classList.remove('open');
 }
 
@@ -100,7 +149,7 @@ async function main() {
       <div class="label"><span>${ch.name}</span><span class="status loading">connecting…</span></div>
     `;
     grid.appendChild(cell);
-    cell.onclick = () => openOverlay(cell, ch.name, ch.id);
+    cell.onclick = () => openOverlay(cell, ch.name, ch.id, ch.ptzEnabled);
 
     const video = cell.querySelector('video');
     const status = cell.querySelector('.status');
