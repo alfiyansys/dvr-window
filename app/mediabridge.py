@@ -23,6 +23,16 @@ WEBRTC_PORT = int(os.environ.get("MEDIAMTX_WEBRTC_PORT", 8889))
 API_PORT = int(os.environ.get("MEDIAMTX_API_PORT", 9997))
 RTSP_PORT = int(os.environ.get("MEDIAMTX_RTSP_PORT", 8554))
 
+# Gates mediamtx's own HLS/WebRTC listeners with the same AUTH_KEY the
+# FastAPI side uses (see app/main.py) — video flows DVR -> mediamtx ->
+# browser directly, never through FastAPI, so protecting only the API
+# wouldn't secure the live view. AUTH_KEY presence is already validated
+# by app.config.load_settings() before this module's start() ever runs.
+# The username isn't a secret (AUTH_KEY is) — fixed since there's
+# exactly one caller class (this app's own frontend).
+MEDIAMTX_AUTH_USER = "viewer"
+AUTH_KEY = os.environ.get("AUTH_KEY")
+
 
 def stream_path_name(channel_id: int, stream_id: str) -> str:
     suffix = "main" if stream_id.endswith("01") else "sub"
@@ -102,6 +112,47 @@ class MediaBridge:
             # LAN) needs to reach these directly, not just this host.
             "hlsAddress": f":{HLS_PORT}",
             "webrtcAddress": f":{WEBRTC_PORT}",
+            # authInternalUsers REPLACES mediamtx's own default user list,
+            # it doesn't merge with it. mediamtx's stock config ships two
+            # entries: an unrestricted one covering publish/read/playback,
+            # and a *separate* one scoped to loopback IPs covering only
+            # api/metrics/pprof with no password. The second entry's
+            # *shape* (IP-restricted, passwordless, narrow actions) is
+            # kept and reused for our own internal loopback processes
+            # below, rather than copied verbatim — extended to `publish`
+            # too (not `read`: unlike `api`/`publish`, which only this
+            # app's own local processes ever need, `read` is exactly what
+            # real remote LAN viewers need to go through the `viewer`
+            # credential for, so it deliberately stays out of the
+            # loopback exemption):
+            #   - add_playback_path/remove_playback_path (control API,
+            #     127.0.0.1:9997) need `api`, sent with no credentials.
+            #   - the H.265 transcode's ffmpeg (_transcode_path below)
+            #     publishes into this same RTSP server from 127.0.0.1
+            #     (spawned locally by mediamtx's own runOnDemand) and
+            #     needs `publish`, also with no credentials.
+            #   - capture_clip's ffmpeg *reads* from the RTSP re-serve —
+            #     needs `read`, which is NOT in this loopback-exempt
+            #     entry, so it explicitly authenticates as `viewer`
+            #     instead (see capture_clip below).
+            "authMethod": "internal",
+            "authInternalUsers": [
+                {
+                    "user": MEDIAMTX_AUTH_USER,
+                    "pass": AUTH_KEY,
+                    "ips": [],
+                    "permissions": [{"action": "read", "path": ""}],
+                },
+                {
+                    "user": "any",
+                    "pass": "",
+                    "ips": ["127.0.0.1", "::1"],
+                    "permissions": [
+                        {"action": "api", "path": ""},
+                        {"action": "publish", "path": ""},
+                    ],
+                },
+            ],
             "paths": paths,
         }
         RUNTIME_CONFIG_PATH.write_text(yaml.safe_dump(config))
@@ -155,10 +206,14 @@ class MediaBridge:
         flowing entirely) — dropping audio was the reliable fix, and most
         channels here don't have it enabled on their main stream anyway.
         """
+        # RTSP read falls under the `read` permission, which the
+        # loopback-exempt authInternalUsers entry deliberately doesn't
+        # grant (see the comment in start() above) — needs real
+        # credentials here, unlike the control-API calls above.
         cmd = [
             "ffmpeg", "-y", "-v", "warning",
             "-rtsp_transport", "tcp",
-            "-i", f"rtsp://127.0.0.1:{RTSP_PORT}/{name}",
+            "-i", f"rtsp://{MEDIAMTX_AUTH_USER}:{AUTH_KEY}@127.0.0.1:{RTSP_PORT}/{name}",
             "-t", str(duration_seconds),
             "-c:v", "copy", "-an",
             str(output_path),

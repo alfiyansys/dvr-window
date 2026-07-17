@@ -29,18 +29,21 @@ class ServerConfig:
 class Settings:
     device: DeviceConfig
     server: ServerConfig
+    auth_key: str
 
 
 def load_settings() -> Settings:
     # All config comes from the environment now, not any tracked file —
     # nothing identifying this specific device (or even this local
     # service's own bind address) ends up in git history. Ports have
-    # standard defaults; host/username/password don't and must be set
-    # explicitly.
+    # standard defaults; host/username/password/auth_key don't and must
+    # be set explicitly (fail-closed — a device exposing PTZ control and
+    # live video on the LAN shouldn't silently run with no key).
     required = {
         "HIKVISION_HOST": os.environ.get("HIKVISION_HOST"),
         "HIKVISION_USERNAME": os.environ.get("HIKVISION_USERNAME"),
         "HIKVISION_PASSWORD": os.environ.get("HIKVISION_PASSWORD"),
+        "AUTH_KEY": os.environ.get("AUTH_KEY"),
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -59,4 +62,4 @@ def load_settings() -> Settings:
         host=os.environ.get("SERVER_HOST", "127.0.0.1"),
         port=int(os.environ.get("SERVER_PORT", 8896)),
     )
-    return Settings(device=device, server=server)
+    return Settings(device=device, server=server, auth_key=required["AUTH_KEY"])

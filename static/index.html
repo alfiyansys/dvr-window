@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>DVR Window</title>
 <script src="/static/vendor/hls.min.js"></script>
+<script src="/static/auth.js"></script>
 <style>
   body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
   h1 { font-size: 18px; font-weight: 600; }
@@ -108,7 +109,7 @@ function openOverlay(cell, name, channelId, ptzEnabled) {
 // same documented ISAPI sign convention but aren't independently verified).
 function ptzSend(pan, tilt, zoom) {
   if (overlayChannelId == null) return;
-  fetch(`/api/ptz/${overlayChannelId}/continuous`, {
+  authFetch(`/api/ptz/${overlayChannelId}/continuous`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pan, tilt, zoom }),
@@ -117,7 +118,7 @@ function ptzSend(pan, tilt, zoom) {
 
 function ptzStop() {
   if (overlayChannelId == null) return;
-  fetch(`/api/ptz/${overlayChannelId}/stop`, { method: 'PUT' });
+  authFetch(`/api/ptz/${overlayChannelId}/stop`, { method: 'PUT' });
 }
 
 for (const btn of document.querySelectorAll('#ptzPad button')) {
@@ -134,12 +135,19 @@ for (const btn of document.querySelectorAll('#ptzZoom button')) {
   btn.addEventListener('pointerleave', ptzStop);
 }
 
-document.getElementById('overlaySnapshot').onclick = () => {
+document.getElementById('overlaySnapshot').onclick = async () => {
   if (overlayChannelId == null) return;
+  // A plain <a href> can't carry the X-Auth-Key header the /api/*
+  // middleware now requires, so fetch as a blob and download that instead.
+  const res = await authFetch(`/api/snapshot?channelId=${overlayChannelId}`);
+  if (!res.ok) return;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = `/api/snapshot?channelId=${overlayChannelId}`;
+  a.href = url;
   a.download = `snapshot_ch${overlayChannelId}_${Date.now()}.jpg`;
   a.click();
+  URL.revokeObjectURL(url);
 };
 
 function closeOverlay() {
@@ -161,7 +169,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 async function main() {
-  const res = await fetch('/api/streams');
+  const res = await authFetch('/api/streams');
   const data = await res.json();
   const grid = document.getElementById('grid');
 
@@ -183,7 +191,7 @@ async function main() {
     const hlsUrl = `http://${location.hostname}:${data.hlsPort}${mainStream.hlsPath}`;
 
     if (Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true });
+      const hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => { status.textContent = 'live'; status.className = 'status ok'; });
@@ -200,7 +208,7 @@ async function main() {
   }
 }
 
-main();
+ensureAuthKey().then(main);
 </script>
 </body>
 </html>

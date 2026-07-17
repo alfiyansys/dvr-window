@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
-from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
@@ -42,6 +42,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="dvr-window", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# Single choke point for API auth — deliberately middleware, not a
+# per-route Depends(), since there's no APIRouter here, just 14 flat
+# routes on the bare `app`; this is the one place a new route can't
+# slip through unauthenticated. Everything NOT under /api/ (the page
+# shells, /static/* assets, /healthz) stays open — no session/cookie/
+# redirect machinery, just a header check on the actual data/control
+# endpoints. This only covers the FastAPI side — the live video itself
+# flows DVR -> mediamtx -> browser directly (never through here), so
+# mediamtx has its own matching auth, see app/mediabridge.py.
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        if request.headers.get("X-Auth-Key") != settings.auth_key:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing X-Auth-Key"})
+    return await call_next(request)
 
 
 @app.get("/")
