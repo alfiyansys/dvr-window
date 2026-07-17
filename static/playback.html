@@ -59,6 +59,11 @@ let currentPlaybackName = null;
 let currentChannelId = null;
 let currentSeg = null;
 let channels = [];
+// Pending "continuous playback" auto-advance — see ARCHITECTURE.md
+// "Continuous playback across recording segments" for why this has to be a
+// timer rather than any video/hls.js event (no reliable "segment ended"
+// signal exists on this DVR).
+let continuousTimer = null;
 
 async function loadChannels() {
   const res = await fetch('/api/channels');
@@ -117,12 +122,23 @@ async function search() {
 }
 
 async function stopCurrent() {
+  // Cancel any pending auto-advance first — covers every interruption path
+  // (manual segment click, jump-to-time, pressing Stop), since they all
+  // call stopCurrent() before starting anything new.
+  if (continuousTimer) { clearTimeout(continuousTimer); continuousTimer = null; }
   if (currentPlaybackName) {
-    await fetch('/api/playback/stop', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: currentPlaybackName }),
-    });
+    try {
+      await fetch('/api/playback/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: currentPlaybackName }),
+      });
+    } catch (e) {
+      // A network hiccup here shouldn't leave our own bookkeeping stuck
+      // pointing at a path we can no longer control — the mediamtx path
+      // itself may leak (existing documented gap, ARCHITECTURE.md), but
+      // the app's state must stay consistent so playback can be restarted.
+    }
     currentPlaybackName = null;
   }
   if (hls) { hls.destroy(); hls = null; }
@@ -132,13 +148,16 @@ async function stopCurrent() {
   currentSeg = null;
 }
 
-// Shared by both "click a segment" and "jump to time": starts playback at
-// an exact startTime (the backend now seeks there — see main.py
-// start_playback — rather than always playing from the segment's own
-// beginning). `searchEndTime` is just a loose upper bound CMSearch uses to
-// locate the covering segment; playback itself runs to that segment's
-// real end, not this value (see ARCHITECTURE.md).
-async function startPlaybackAt(channelId, startTime, searchEndTime, labelText, activeEl) {
+// Shared by "click a segment", "jump to time", and continuous-playback
+// auto-advance: starts playback at an exact startTime (the backend seeks
+// there — see main.py start_playback — rather than always playing from the
+// segment's own beginning, and clamps to the actual found segment's start
+// if startTime falls in a real recording gap). `searchEndTime` is just a
+// loose upper bound CMSearch uses to locate the covering segment; the
+// backend returns the segment's *real* resolved boundaries
+// (segmentStartTime/segmentEndTime), which is what drives the label, the
+// download defaults, and scheduling the next auto-advance.
+async function startPlaybackAt(channelId, startTime, searchEndTime, activeEl) {
   await stopCurrent();
   document.querySelectorAll('.segment.active').forEach(e => e.classList.remove('active'));
   if (activeEl) activeEl.classList.add('active');
@@ -146,18 +165,25 @@ async function startPlaybackAt(channelId, startTime, searchEndTime, labelText, a
   currentChannelId = channelId;
   currentSeg = { startTime, endTime: searchEndTime };
 
-  const res = await fetch('/api/playback/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channelId: Number(channelId), startTime, endTime: searchEndTime }),
-  });
+  let res;
+  try {
+    res = await fetch('/api/playback/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId: Number(channelId), startTime, endTime: searchEndTime }),
+    });
+  } catch (e) {
+    document.getElementById('playerLabel').textContent = 'gagal memulai playback (jaringan)';
+    return;
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     document.getElementById('playerLabel').textContent = err.detail || 'gagal memulai playback';
     return;
   }
-  const { name, hlsPath, hlsPort } = await res.json();
+  const { name, hlsPath, hlsPort, segmentStartTime, segmentEndTime } = await res.json();
   currentPlaybackName = name;
+  currentSeg = { startTime: segmentStartTime, endTime: segmentEndTime };
 
   const video = document.getElementById('video');
   const url = `http://${location.hostname}:${hlsPort}${hlsPath}`;
@@ -166,20 +192,73 @@ async function startPlaybackAt(channelId, startTime, searchEndTime, labelText, a
   hls.attachMedia(video);
   hls.on(Hls.Events.MANIFEST_PARSED, () => {
     video.play();
-    document.getElementById('playerLabel').textContent = labelText;
+    // A real recording gap: the resolved segment starts noticeably later
+    // than what was actually requested (tolerance covers the existing +2s
+    // search-boundary nudge). Contiguous segment transitions land within
+    // that tolerance and show the plain range.
+    const gapMs = new Date(segmentStartTime).getTime() - new Date(startTime).getTime();
+    const rangeLabel = `${fmtTime(segmentStartTime)} – ${fmtTime(segmentEndTime)}`;
+    document.getElementById('playerLabel').textContent = gapMs > 5000
+      ? `Melompati jeda rekaman → ${rangeLabel}`
+      : rangeLabel;
     document.getElementById('downloadControls').style.display = 'inline-flex';
-    // Default clip window: requested start, +30s — same duration heuristic
-    // as before, just expressed as an editable end time instead of a
-    // fixed "duration" input, so the actual clip range can be adjusted
-    // to any time (e.g. 07:00:00–07:00:30).
-    const defaultEnd = new Date(new Date(startTime).getTime() + 30000).toISOString();
-    document.getElementById('downloadStart').value = hms(startTime);
+    // Default clip window: segment start, +30s.
+    const defaultEnd = new Date(new Date(segmentStartTime).getTime() + 30000).toISOString();
+    document.getElementById('downloadStart').value = hms(segmentStartTime);
     document.getElementById('downloadEnd').value = hms(defaultEnd);
+    scheduleAdvance(segmentStartTime, segmentEndTime);
+  });
+  hls.on(Hls.Events.ERROR, (_evt, data) => {
+    if (!data.fatal) return;
+    if (continuousTimer) { clearTimeout(continuousTimer); continuousTimer = null; }
+    document.getElementById('playerLabel').textContent = 'Playback error — klik segmen untuk coba lagi';
   });
 }
 
+// Fires a few seconds before the current segment's known natural end (see
+// ARCHITECTURE.md — there's no reliable "segment ended" event on this DVR,
+// mediamtx treats the DVR closing the playback session as a transport
+// error and the video just silently freezes). Guards against hls.js
+// re-firing MANIFEST_PARSED (e.g. on error-recovery) by clearing any
+// existing timer itself, not just relying on stopCurrent().
+function scheduleAdvance(realStart, realEnd) {
+  if (continuousTimer) { clearTimeout(continuousTimer); continuousTimer = null; }
+  const durationMs = new Date(realEnd).getTime() - new Date(realStart).getTime();
+  const leadMs = 4500;
+  const fireInMs = Math.max(0, durationMs - leadMs);
+  armAdvanceCheck(realEnd, fireInMs, fireInMs, 0);
+}
+
+// Bounded drift-check: if the video is still meaningfully behind where it
+// should be (rebuffering — the `waiting` events this DVR fires are real,
+// not instantaneous), re-check shortly instead of cutting the segment
+// early or advancing while the previous stream hasn't actually caught up.
+// Capped retries so a genuinely stuck video doesn't block forever.
+function armAdvanceCheck(afterIso, expectedElapsedMs, delayMs, retries) {
+  continuousTimer = setTimeout(() => {
+    const video = document.getElementById('video');
+    const behindMs = expectedElapsedMs - video.currentTime * 1000;
+    if (behindMs > 1500 && retries < 3) {
+      armAdvanceCheck(afterIso, expectedElapsedMs + 1500, 1500, retries + 1);
+      return;
+    }
+    advanceToNext(afterIso);
+  }, delayMs);
+}
+
+async function advanceToNext(afterIso) {
+  const channelId = currentChannelId;
+  if (channelId == null) return;
+  const searchEnd = `${afterIso.slice(0, 10)}T23:59:59Z`;
+  try {
+    await startPlaybackAt(channelId, afterIso, searchEnd, null);
+  } catch (e) {
+    document.getElementById('playerLabel').textContent = 'auto-lanjut gagal — klik segmen untuk lanjut manual';
+  }
+}
+
 async function play(channelId, seg, el) {
-  await startPlaybackAt(channelId, seg.startTime, seg.endTime, `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`, el);
+  await startPlaybackAt(channelId, seg.startTime, seg.endTime, el);
 }
 
 async function jumpToTime() {
@@ -188,7 +267,7 @@ async function jumpToTime() {
   if (!dt) { alert('Isi tanggal & waktu dulu'); return; }
   const startTime = `${dt.length === 16 ? dt + ':00' : dt}Z`;
   const endTime = `${startTime.slice(0, 10)}T23:59:59Z`;
-  await startPlaybackAt(channelId, startTime, endTime, `Lompat ke ${fmtTime(startTime)}`, null);
+  await startPlaybackAt(channelId, startTime, endTime, null);
 }
 
 async function downloadClip() {

@@ -208,6 +208,73 @@ Two dead ends hit along the way, kept here so they aren't retried:
   The real cutoff is enforced by ffmpeg's `-t`, not by trusting the
   DVR/mediamtx to stop on their own.
 
+## Continuous playback across recording segments
+
+Playback of a single segment used to just silently freeze once it
+reached the end of its requested time range — confirmed by
+instrumenting the `<video>` element through a real boundary: `ended`
+**never fires**. Instead `waiting` → `pause` fires and `currentTime`
+freezes permanently, with no error surfaced anywhere. mediamtx's own
+log explains why: `[RTSP source] stopped: an error occurred` →
+`muxer destroyed: terminated` — the DVR closing the playback RTSP
+session at the end of the requested range is treated as a transport
+**error**, not a clean end-of-stream signal (a deliberate
+`/api/playback/stop` instead logs the different `stopped: path is
+closing`). There is no reliable event-based way to detect "segment
+finished" on this DVR.
+
+The fix (`static/playback.html`) is a client-side timer, not event
+detection: `scheduleAdvance` computes the current segment's known
+duration and fires ~4.5s before its expected natural end, calling
+`advanceToNext` to start the next segment proactively — before the
+freeze/error state is ever reached. A bounded drift-check
+(`armAdvanceCheck`) compares `video.currentTime` against expected
+elapsed time first and re-arms up to 3 times if the video is still
+rebuffering, rather than cutting a stalled segment short.
+
+Chaining reuses `/api/playback/start` unmodified (no new endpoint) —
+calling it again with `startTime` = the previous segment's end just
+finds and plays whatever comes next. This needed one real backend fix
+first, caught by a design-review pass before implementation: naively
+trusting the caller's `startTime` would ask the DVR to stream from a
+timestamp inside a real recording gap (if one exists) rather than the
+next segment's actual start, reproducing the exact freeze bug instead
+of skipping over the gap. `start_playback` now clamps server-side —
+`effective_start = max(requested_start, match["startTime"])` — and
+returns the resolved `segmentStartTime`/`segmentEndTime` in its
+response (previously just `{name, hlsPath, hlsPort}`) so the frontend
+knows the *real* boundaries, not just what it optimistically requested
+(needed for both accurate gap-vs-contiguous labeling and scheduling the
+*next* advance correctly).
+
+Verified against the real DVR: jumped to 10s before a known segment
+end, confirmed via the DVR's own on-screen timestamp overlay
+(extracted with `ffmpeg -frames:v 1` directly against the HLS URL,
+bypassing the browser entirely) that the stream kept flowing correctly
+more than 3 minutes past the transition point — not just that the API
+returned success. (A `<video>` element in the browser tab used for
+testing appeared to "pause" after the transition; that turned out to
+be Chrome's background-tab power-saving policy pausing video-only
+media in a non-focused automation tab — `AbortError: ... paused to
+save power` — not a bug in the app. Confirmed the actual stream was
+fine independent of that via the direct ffmpeg frame extraction above.)
+Also verified: `stopCurrent()` clears any pending advance timer (so
+manually navigating away — clicking a different segment, pressing
+Stop — cancels a scheduled auto-advance), and no orphaned mediamtx
+paths accumulate across a chain of transitions (each transition's
+`stopCurrent()` cleanly tears down the previous path before the next
+one is created — matched started/stopped counts in mediamtx's log
+across a full test session).
+
+Explicit non-goals: cross-midnight/cross-day continuation (the search
+upper bound used when chaining is same-day only; running off the end
+of a day's recordings just stops cleanly with the existing "No
+recording found" error rather than attempting date-rollover logic); a
+true seamless crossfade via a second hidden `<video>` element (rejected
+as excess complexity for a single-user local tool — a brief ~1-2s gap
+during the source swap is accepted); an opt-out toggle (always-on by
+design).
+
 ## IP-proxy channels (9/10)
 
 Channels 9/10 on this DVR are ONVIF cameras proxied through it, not

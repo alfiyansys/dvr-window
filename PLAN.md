@@ -23,6 +23,7 @@ Rationale in `ARCHITECTURE.md`.
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
 | 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
 | 6 | ⬜ next | Polish/packaging — systemd service, playback-path GC, event/alarm stream, basic auth on the local UI |
+| 7 | ✅ done | Continuous playback across recording-segment boundaries — auto-advance into the next segment instead of freezing at the end of one; skip forward over a real recording gap instead of stopping. See `ARCHITECTURE.md` "Continuous playback across recording segments". |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than

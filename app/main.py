@@ -250,8 +250,20 @@ def start_playback(req: PlaybackStartRequest):
     # Keep the segment's own endTime rather than the caller's (which may
     # just be a loose upper bound used to locate the segment, e.g. "jump
     # to time" passes end-of-day) so playback runs to the segment's real end.
+    #
+    # Clamp to the match's own start rather than trusting req.startTime
+    # blindly: continuous playback (chaining from one segment into the
+    # next) deliberately requests a startTime that can fall in a real
+    # recording gap before the next segment. Without this clamp, the DVR
+    # would be asked to stream from a timestamp with no footage, which
+    # reproduces the segment-end freeze bug (see ARCHITECTURE.md) instead
+    # of cleanly landing on the next segment's actual start.
     match = matches[0]
-    playback_uri = _rewrite_playback_window(match["playbackURI"], req.startTime, match["endTime"])
+    match_start = datetime.fromisoformat(match["startTime"].rstrip("Z"))
+    requested_start = datetime.fromisoformat(req.startTime.rstrip("Z"))
+    effective_start = max(requested_start, match_start).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    playback_uri = _rewrite_playback_window(match["playbackURI"], effective_start, match["endTime"])
     device = settings.device
     source_url = playback_uri.replace(
         "rtsp://", f"rtsp://{device.username}:{device.password}@", 1
@@ -260,7 +272,13 @@ def start_playback(req: PlaybackStartRequest):
     name = f"pb_ch{req.channelId}_{uuid.uuid4().hex[:8]}"
     bridge.add_playback_path(name, source_url)
 
-    return {"name": name, "hlsPath": f"/{name}/index.m3u8", "hlsPort": HLS_PORT}
+    return {
+        "name": name,
+        "hlsPath": f"/{name}/index.m3u8",
+        "hlsPort": HLS_PORT,
+        "segmentStartTime": effective_start,
+        "segmentEndTime": match["endTime"],
+    }
 
 
 class PlaybackStopRequest(BaseModel):
