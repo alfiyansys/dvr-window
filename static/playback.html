@@ -39,7 +39,9 @@
     <div class="bar">
       <span id="playerLabel">tidak ada yang diputar</span>
       <span id="downloadControls" style="display:none">
-        <input type="number" id="downloadSeconds" value="30" min="1" max="300" style="width:60px" title="durasi (detik)"> detik
+        <input type="time" id="downloadStart" step="1" style="width:100px" title="waktu mulai (dalam hari rekaman ini)">
+        &ndash;
+        <input type="time" id="downloadEnd" step="1" style="width:100px" title="waktu selesai">
         <button id="downloadBtn">Download ⬇</button>
         <button id="stopBtn">Stop</button>
       </span>
@@ -73,6 +75,13 @@ async function loadChannels() {
 function fmtTime(iso) {
   const m = iso.match(/T(\d{2}):(\d{2}):(\d{2})/);
   return m ? `${m[1]}.${m[2]}.${m[3]}` : iso;
+}
+
+// Same literal-digit rule as fmtTime, just colon-separated to match
+// <input type="time">'s value format ("HH:MM:SS").
+function hms(iso) {
+  const m = iso.match(/T(\d{2}):(\d{2}):(\d{2})/);
+  return m ? `${m[1]}:${m[2]}:${m[3]}` : '';
 }
 
 async function search() {
@@ -149,18 +158,32 @@ async function play(channelId, seg, el) {
     video.play();
     document.getElementById('playerLabel').textContent = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
     document.getElementById('downloadControls').style.display = 'inline-flex';
+    // Default clip window: segment start, +30s — same duration heuristic
+    // as before, just expressed as an editable end time instead of a
+    // fixed "duration" input, so the actual clip range can be adjusted
+    // to any time within the segment (e.g. 07:00:00–07:00:30).
+    const defaultEnd = new Date(new Date(seg.startTime).getTime() + 30000).toISOString();
+    document.getElementById('downloadStart').value = hms(seg.startTime);
+    document.getElementById('downloadEnd').value = hms(defaultEnd);
   });
 }
 
 async function downloadClip() {
   if (!currentSeg || currentChannelId == null) return;
-  const seconds = Math.max(1, Math.min(300, Number(document.getElementById('downloadSeconds').value) || 30));
-  // Pure duration arithmetic on the DVR's timestamp digits (Date parses the
-  // "Z" string and toISOString() emits it back the same way) — NOT the same
-  // as the toLocaleTimeString() display conversion that caused the earlier
-  // timezone bug, since no browser-local timezone is applied here.
-  const startTime = currentSeg.startTime;
-  const endTime = new Date(new Date(startTime).getTime() + seconds * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const startHms = document.getElementById('downloadStart').value;
+  const endHms = document.getElementById('downloadEnd').value;
+  if (!startHms || !endHms) { alert('Isi waktu mulai dan selesai'); return; }
+
+  // Build the DVR-literal-digit timestamp directly from the segment's own
+  // date plus the typed HH:MM:SS — plain string concatenation, no Date()
+  // parsing/math involved, so there's no risk of the browser's local
+  // timezone leaking in (see the fake-UTC note on fmtTime above). Assumes
+  // both times fall on the segment's own calendar date; doesn't handle a
+  // range typed across a midnight boundary.
+  const dateStr = currentSeg.startTime.slice(0, 10);
+  const pad = (t) => (t.length === 5 ? `${t}:00` : t);
+  const startTime = `${dateStr}T${pad(startHms)}Z`;
+  const endTime = `${dateStr}T${pad(endHms)}Z`;
 
   const btn = document.getElementById('downloadBtn');
   const originalText = btn.textContent;
