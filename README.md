@@ -5,6 +5,9 @@ Component" DVR web plugin. A small Python backend + static web UI that
 talks to the DVR directly over its documented **ISAPI** (HTTP) and
 **RTSP** protocols — no closed-source SDK, no Windows box required.
 
+This project is vibe coded — built in collaboration with an AI coding
+agent (Claude Code) rather than written by hand line-by-line.
+
 ## Features
 
 - **Live view** — grid of all channels (analog + IP-proxy cameras),
