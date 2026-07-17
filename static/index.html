@@ -71,6 +71,8 @@
         <span id="overlayName"></span>
         <div class="actions">
           <button id="overlaySnapshot">Snapshot 📷</button>
+          <button id="overlayPrev">◂ Prev</button>
+          <button id="overlayNext">Next ▸</button>
           <button id="overlayClose">Close ✕</button>
         </div>
       </div>
@@ -150,22 +152,50 @@ document.getElementById('overlaySnapshot').onclick = async () => {
   URL.revokeObjectURL(url);
 };
 
-function closeOverlay() {
+function returnSlottedVideoHome() {
   const slot = document.getElementById('overlaySlot');
   const video = slot.querySelector('video');
   if (video && video._homeCell) {
     video._homeCell.insertBefore(video, video._homeCell.firstChild);
   }
+}
+
+function closeOverlay() {
+  returnSlottedVideoHome();
   ptzStop();
   document.getElementById('overlay').classList.remove('open');
 }
 
+// Cycles to the adjacent camera in grid order without closing the
+// overlay — wraps around at either end. Reads channel metadata off the
+// cell's own dataset (set in main() below) rather than re-fetching,
+// since these buttons have no closure over the clicked cell the way
+// openOverlay's caller does.
+function showAdjacent(step) {
+  if (overlayChannelId == null) return;
+  const cells = Array.from(document.querySelectorAll('#grid .cell'));
+  if (cells.length < 2) return;
+  const currentIndex = cells.findIndex(c => Number(c.dataset.channelId) === overlayChannelId);
+  if (currentIndex === -1) return;
+  const next = cells[(currentIndex + step + cells.length) % cells.length];
+  ptzStop();
+  returnSlottedVideoHome();
+  openOverlay(next, next.dataset.name, Number(next.dataset.channelId), next.dataset.ptzEnabled === 'true');
+}
+const showNext = () => showAdjacent(1);
+const showPrev = () => showAdjacent(-1);
+
+document.getElementById('overlayNext').onclick = showNext;
+document.getElementById('overlayPrev').onclick = showPrev;
 document.getElementById('overlayClose').onclick = closeOverlay;
 document.getElementById('overlay').addEventListener('click', (e) => {
   if (e.target.id === 'overlay') closeOverlay();
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeOverlay();
+  if (!document.getElementById('overlay').classList.contains('open')) return;
+  if (e.key === 'ArrowRight') showNext();
+  if (e.key === 'ArrowLeft') showPrev();
 });
 
 async function main() {
@@ -179,6 +209,9 @@ async function main() {
 
     const cell = document.createElement('div');
     cell.className = 'cell';
+    cell.dataset.channelId = ch.id;
+    cell.dataset.name = ch.name;
+    cell.dataset.ptzEnabled = ch.ptzEnabled ? 'true' : 'false';
     cell.innerHTML = `
       <video muted autoplay playsinline></video>
       <div class="label"><span>${ch.name}</span><span class="status loading">connecting…</span></div>
