@@ -98,3 +98,7 @@ script) is next — see `PLAN.md` for the full roadmap.
 - `AGENTS.md` — contributor/agent instructions, conventions
 - `ARCHITECTURE.md` — technical design, protocol reference, known DVR quirks
 - `PLAN.md` — roadmap and phase status
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
