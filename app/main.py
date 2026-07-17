@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     isapi = ISAPIClient(settings.device)
     app.state.isapi = isapi
 
-    channels = [_build_channel(isapi, vi, isapi.get_streaming_channels()) for vi in isapi.get_video_input_channels()]
+    channels = _discover_channels(isapi)
     app.state.channels = channels
 
     bridge = MediaBridge()
@@ -44,11 +44,8 @@ app = FastAPI(title="hikvision-localservice", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-def _build_channel(isapi: ISAPIClient, video_input: dict, streaming_channels: list[dict]) -> dict:
-    channel_id = int(video_input["id"])
-    enabled = video_input["videoInputEnabled"] == "true"
-
-    streams = [
+def _streams_for_channel(streaming_channels: list[dict], match_key: str, channel_id: int) -> list[dict]:
+    return [
         {
             "streamId": sc["id"],
             "codec": sc["Video"]["videoCodecType"],
@@ -57,17 +54,25 @@ def _build_channel(isapi: ISAPIClient, video_input: dict, streaming_channels: li
             "audioEnabled": sc["Audio"]["enabled"] == "true",
         }
         for sc in streaming_channels
-        if int(sc["Video"]["videoInputChannelID"]) == channel_id
+        if match_key in sc["Video"] and int(sc["Video"][match_key]) == channel_id
     ]
 
-    ptz = None
-    if enabled:
-        caps = isapi.get_ptz_capabilities(channel_id)
-        if caps is not None:
-            ptz = {
-                "enabled": caps["enabled"] == "true",
-                "controlProtocol": caps["controlProtocol"]["#text"] if isinstance(caps["controlProtocol"], dict) else caps["controlProtocol"],
-            }
+
+def _build_ptz(isapi: ISAPIClient, channel_id: int) -> dict | None:
+    caps = isapi.get_ptz_capabilities(channel_id)
+    if caps is None:
+        return None
+    return {
+        "enabled": caps["enabled"] == "true",
+        "controlProtocol": caps["controlProtocol"]["#text"] if isinstance(caps["controlProtocol"], dict) else caps["controlProtocol"],
+    }
+
+
+def _build_channel(isapi: ISAPIClient, video_input: dict, streaming_channels: list[dict]) -> dict:
+    channel_id = int(video_input["id"])
+    enabled = video_input["videoInputEnabled"] == "true"
+    streams = _streams_for_channel(streaming_channels, "videoInputChannelID", channel_id)
+    ptz = _build_ptz(isapi, channel_id) if enabled else None
 
     return {
         "id": channel_id,
@@ -79,12 +84,40 @@ def _build_channel(isapi: ISAPIClient, video_input: dict, streaming_channels: li
     }
 
 
+def _build_ip_channel(isapi: ISAPIClient, proxy_channel: dict, streaming_channels: list[dict]) -> dict:
+    """IP-camera slots (ONVIF-proxied through the DVR — channels 9/10 on
+    this unit) are discovered via a separate ISAPI list
+    (/ISAPI/ContentMgmt/InputProxy/channels), not
+    /ISAPI/System/Video/inputs/channels (analog-only), and key their
+    streaming channels by dynVideoInputChannelID instead of
+    videoInputChannelID. Confirmed once these channels came online — see
+    MEMORY.md."""
+    channel_id = int(proxy_channel["id"])
+    streams = _streams_for_channel(streaming_channels, "dynVideoInputChannelID", channel_id)
+    enabled = len(streams) > 0
+    ptz = _build_ptz(isapi, channel_id) if enabled else None
+
+    return {
+        "id": channel_id,
+        "name": proxy_channel["name"],
+        "enabled": enabled,
+        "resolution": f"{streams[0]['width']}*{streams[0]['height']}" if streams else "NO VIDEO",
+        "streams": streams,
+        "ptz": ptz,
+    }
+
+
+def _discover_channels(isapi: ISAPIClient) -> list[dict]:
+    streaming_channels = isapi.get_streaming_channels()
+    channels = [_build_channel(isapi, vi, streaming_channels) for vi in isapi.get_video_input_channels()]
+    channels += [_build_ip_channel(isapi, pc, streaming_channels) for pc in isapi.get_input_proxy_channels()]
+    return channels
+
+
 @app.get("/api/channels")
 def get_channels():
     isapi: ISAPIClient = app.state.isapi
-    video_inputs = isapi.get_video_input_channels()
-    streaming_channels = isapi.get_streaming_channels()
-    return [_build_channel(isapi, vi, streaming_channels) for vi in video_inputs]
+    return _discover_channels(isapi)
 
 
 @app.get("/api/streams")

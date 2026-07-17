@@ -178,6 +178,37 @@ Two dead ends hit along the way, kept here so they aren't retried:
   The real cutoff is enforced by ffmpeg's `-t`, not by trusting the
   DVR/mediamtx to stop on their own.
 
+## IP-proxy channels (9/10)
+
+Channels 9/10 on this DVR are ONVIF cameras proxied through it, not
+analog inputs — discovered via a completely separate ISAPI list,
+`/ISAPI/ContentMgmt/InputProxy/channels` (`InputProxyChannel` entries),
+which `/ISAPI/System/Video/inputs/channels` (analog-only) never
+returns. Their streaming-channel entries (`/ISAPI/Streaming/channels`)
+also key back to the input differently — `dynVideoInputChannelID`
+instead of `videoInputChannelID` — confirmed once these channels came
+online (`app/main.py`: `_build_ip_channel`/`_streams_for_channel` keys
+off whichever field is present).
+
+Once discovered, these channels reuse the same channel-ID numbering
+scheme as everything else (`_main_track_id` = `channel_id * 100 + 1`,
+so channel 9 → track/stream `901`) and the same RTSP live path
+(`rtsp://host:554/Streaming/Channels/901`) — live view, search
+(`CMSearch`), playback, and download all work against them unmodified.
+
+Two endpoints don't, though, both firmware-side on this DVR (not
+account-privilege related — same read-only account works fine for
+channels 1-4 on these same endpoints):
+
+- **PTZ capabilities** (`/ISAPI/PTZCtrl/channels/9/capabilities`) →
+  `400 badXmlContent`, not `404`. Since PTZ is already out of scope
+  (Phase 3 skipped), `get_ptz_capabilities` treats this the same as
+  "no PTZ" rather than raising.
+- **Snapshot** (`/ISAPI/Streaming/channels/901/picture`) → same `400
+  badXmlContent`. Not fixed — `/api/snapshot?channelId=9` currently
+  surfaces this as a raw 500. Revisit if snapshot support for these
+  channels is needed; no workaround found yet.
+
 ## Known device quirks and bugs
 
 These are DVR-firmware behaviors (V4.30.300), not bugs in this

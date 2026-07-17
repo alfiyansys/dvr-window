@@ -21,18 +21,19 @@ this repo.
 **Never commit passwords to this repo.** Password for `<redacted-username>` goes
 in a local, gitignored `.env` (`HIKVISION_PASSWORD=...`, see `.env.example`).
 
-## Device state (as of 2026-07-12)
+## Device state (as of 2026-07-17)
 
 - 4 active analog channels, all main streams now H.264 (2-4 were switched from H.265 manually via the DVR menu, needed for Chrome playback — see `ARCHITECTURE.md` "Known device quirks and bugs"): 1 Teras, 2 Car Port, 3 Garasi, 4 Ruang Tamu. Sub-streams may still be H.265, not yet used by the UI. Channels 5-8: no video input.
-- Channels 9-10 exist (likely IP-camera slots on this hybrid DVR) but were **offline** at last check — re-verify before assuming their protocol shape matches the analog channels.
+- Channels 9-10 are now **online**: ONVIF-proxied IP cameras (`/ISAPI/ContentMgmt/InputProxy/channels`, not the analog `/ISAPI/System/Video/inputs/channels` list) — 9 "IPCamera 01" at `<redacted-camera-host>:5000`, 10 "IPCamera 02" at `<redacted-camera-host>:5000`. Channel 9's main stream is H.264 (browser-playable); channel 10's is H.265 (black frame in Chrome, same known quirk as the analog channels — can't fix from this read-only account). See `ARCHITECTURE.md` "IP-proxy channels (9/10)" for the app-side support and its gaps.
 - No PTZ hardware attached to any active channel — Phase 3 skipped.
 
 ## Progress
 
 - [x] Phase 0 (device recon), 1 (backend core), 2 (live view), 4 (playback & search), 5 (snapshot & download) — see `PLAN.md` Milestones table for details.
+- [x] Channels 9/10 (IP-proxy) support added to `/api/channels` and the live-view media bridge — 2026-07-17.
 - [~] Phase 3 (PTZ) — skipped, no hardware to support it.
 - [ ] Phase 6 (packaging) — next up.
-- [ ] Re-verify channels 9/10 once back online.
+- [ ] Snapshot for channels 9/10 is broken on this firmware (`400 badXmlContent` from `/ISAPI/Streaming/channels/90x/picture`) — not fixed, see `ARCHITECTURE.md`.
 
 ## Before touching ISAPI timestamps or playback
 

@@ -50,6 +50,13 @@ class ISAPIClient:
         data = self._get_xml("/ISAPI/Streaming/channels")
         return _as_list(data["StreamingChannelList"]["StreamingChannel"])
 
+    def get_input_proxy_channels(self) -> list[dict]:
+        """IP-camera slots (ONVIF-proxied through the DVR, channels 9/10 on
+        this unit) aren't listed by get_video_input_channels (analog-only)
+        — they have their own discovery endpoint."""
+        data = self._get_xml("/ISAPI/ContentMgmt/InputProxy/channels")
+        return _as_list(data["InputProxyChannelList"]["InputProxyChannel"])
+
     def get_snapshot(self, stream_id: int) -> bytes:
         resp = self._client.get(f"/ISAPI/Streaming/channels/{stream_id}/picture")
         resp.raise_for_status()
@@ -60,7 +67,12 @@ class ISAPIClient:
             data = self._get_xml(f"/ISAPI/PTZCtrl/channels/{channel_id}/capabilities")
             return data["PTZChannelCap"]
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
+            # 404: no PTZ endpoint for this channel at all. 400/badXmlContent:
+            # IP-proxy channels (9/10 on this DVR) use a different channel-ID
+            # scheme than PTZCtrl expects — PTZ is out of scope for this
+            # project anyway (see PLAN.md, Phase 3 skipped), so treat the
+            # same as "no PTZ" rather than raise.
+            if exc.response.status_code in (404, 400):
                 return None
             raise
 
