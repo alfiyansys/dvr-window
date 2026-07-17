@@ -36,6 +36,15 @@ set them if a default conflicts with something.
 ## Run
 
 ```
+./run.sh
+```
+
+Idempotent — on a first run it does the venv/pip/mediamtx-download setup
+above automatically (still requires `.env` to already exist and be
+filled in), on later runs it skips straight to starting. Equivalent to
+running the setup steps above by hand plus:
+
+```
 .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8896
 ```
 
