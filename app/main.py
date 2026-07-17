@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
         isapi.close()
 
 
-app = FastAPI(title="hikvision-localservice", lifespan=lifespan)
+app = FastAPI(title="dvr-window", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

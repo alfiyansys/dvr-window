@@ -1,4 +1,4 @@
-# Hikvision Local Service — Linux Port (Plan)
+# DVR Window (Plan)
 
 Roadmap and phase status. Technical design (protocols, media bridge,
 known device quirks) is in `ARCHITECTURE.md`; current device state and
