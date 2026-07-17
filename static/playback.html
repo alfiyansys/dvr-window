@@ -21,6 +21,12 @@
   .player video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
   .player .bar { padding: 8px 10px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; }
   .empty { padding: 12px; color: #888; font-size: 13px; }
+
+  .timeline { position: relative; height: 34px; background: #0a0a0a; cursor: pointer; border-top: 1px solid #262626; }
+  .timeline .block { position: absolute; top: 6px; height: 14px; background: #3b7ddb; border-radius: 2px; min-width: 2px; }
+  .timeline .block:hover { background: #5b9bf5; }
+  .timeline .tick { position: absolute; top: 22px; font-size: 10px; color: #666; transform: translateX(-50%); pointer-events: none; }
+  .timeline .marker { position: absolute; top: 0; width: 2px; height: 100%; background: #f87171; pointer-events: none; display: none; }
 </style>
 </head>
 <body>
@@ -50,6 +56,7 @@
       </span>
     </div>
     <video id="video" muted controls playsinline></video>
+    <div class="timeline" id="timeline"></div>
   </div>
 </div>
 
@@ -64,6 +71,9 @@ let channels = [];
 // timer rather than any video/hls.js event (no reliable "segment ended"
 // signal exists on this DVR).
 let continuousTimer = null;
+// The day currently shown by search() — drives the timeline scrubber below.
+let loadedSegments = [];
+let loadedDate = null;
 
 async function loadChannels() {
   const res = await fetch('/api/channels');
@@ -92,6 +102,78 @@ function hms(iso) {
   return m ? `${m[1]}:${m[2]}:${m[3]}` : '';
 }
 
+// Seconds since midnight of `forDate` ("YYYY-MM-DD"), clipped to [0,86400]
+// for timestamps that fall on a different calendar date (a segment can
+// start the previous day and end within the loaded day — see the
+// contiguous-segment example spanning 22:33→00:02 seen against the real
+// DVR). Pure string/integer arithmetic, no Date object — same literal-
+// digit rule as fmtTime/hms, just for timeline positioning instead of
+// display text.
+function secondsSinceMidnight(iso, forDate) {
+  const datePart = iso.slice(0, 10);
+  if (datePart < forDate) return 0;
+  if (datePart > forDate) return 86400;
+  const m = iso.match(/T(\d{2}):(\d{2}):(\d{2})/);
+  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
+// Draws the day timeline: recorded segments as blocks, hour ticks for
+// orientation, and the current-position marker. Called whenever a new
+// day is loaded (search()) — the marker itself is also updated
+// independently (updateMarker) whenever playback moves, without
+// rebuilding the whole timeline.
+function renderTimeline() {
+  const el = document.getElementById('timeline');
+  el.innerHTML = '';
+  if (!loadedDate) return;
+
+  for (const seg of loadedSegments) {
+    const startSec = secondsSinceMidnight(seg.startTime, loadedDate);
+    const endSec = secondsSinceMidnight(seg.endTime, loadedDate);
+    const block = document.createElement('div');
+    block.className = 'block';
+    block.style.left = `${(startSec / 86400) * 100}%`;
+    block.style.width = `${((endSec - startSec) / 86400) * 100}%`; // CSS min-width floors this for short clips
+    block.title = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
+    el.appendChild(block);
+  }
+
+  for (let h = 0; h <= 24; h += 4) {
+    const tick = document.createElement('div');
+    tick.className = 'tick';
+    tick.style.left = `${(h / 24) * 100}%`;
+    tick.textContent = String(h).padStart(2, '0');
+    el.appendChild(tick);
+  }
+
+  const marker = document.createElement('div');
+  marker.className = 'marker';
+  marker.id = 'timelineMarker';
+  el.appendChild(marker);
+
+  updateMarker();
+}
+
+// Moves just the position marker — called on every video timeupdate, and
+// explicitly right after currentSeg changes (both the optimistic
+// assignment and the real one in startPlaybackAt, plus stopCurrent's
+// reset to null) so the marker never shows a stale position from before
+// the change. Hidden whenever nothing is playing or the playing content
+// isn't from the currently-loaded day.
+function updateMarker() {
+  const marker = document.getElementById('timelineMarker');
+  if (!marker) return;
+  if (!currentSeg || !loadedDate || currentSeg.startTime.slice(0, 10) !== loadedDate) {
+    marker.style.display = 'none';
+    return;
+  }
+  const video = document.getElementById('video');
+  const startSec = secondsSinceMidnight(currentSeg.startTime, loadedDate);
+  const nowSec = startSec + (video.currentTime || 0);
+  marker.style.left = `${Math.min(100, Math.max(0, (nowSec / 86400) * 100))}%`;
+  marker.style.display = 'block';
+}
+
 async function search() {
   const channelId = document.getElementById('channel').value;
   const date = document.getElementById('date').value;
@@ -105,6 +187,10 @@ async function search() {
 
   const res = await fetch(`/api/recordings?channelId=${channelId}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
   const data = await res.json();
+
+  loadedSegments = data.segments;
+  loadedDate = date;
+  renderTimeline();
 
   if (data.segments.length === 0) {
     container.innerHTML = '<div class="empty">Tidak ada rekaman di rentang ini.</div>';
@@ -146,6 +232,7 @@ async function stopCurrent() {
   document.getElementById('playerLabel').textContent = 'tidak ada yang diputar';
   currentChannelId = null;
   currentSeg = null;
+  updateMarker();
 }
 
 // Shared by "click a segment", "jump to time", and continuous-playback
@@ -164,6 +251,7 @@ async function startPlaybackAt(channelId, startTime, searchEndTime, activeEl) {
   document.getElementById('playerLabel').textContent = 'memuat…';
   currentChannelId = channelId;
   currentSeg = { startTime, endTime: searchEndTime };
+  updateMarker();
 
   let res;
   try {
@@ -184,6 +272,7 @@ async function startPlaybackAt(channelId, startTime, searchEndTime, activeEl) {
   const { name, hlsPath, hlsPort, segmentStartTime, segmentEndTime } = await res.json();
   currentPlaybackName = name;
   currentSeg = { startTime: segmentStartTime, endTime: segmentEndTime };
+  updateMarker();
 
   const video = document.getElementById('video');
   const url = `http://${location.hostname}:${hlsPort}${hlsPath}`;
@@ -270,6 +359,27 @@ async function jumpToTime() {
   await startPlaybackAt(channelId, startTime, endTime, null);
 }
 
+// Click-to-seek on the day timeline — reuses startPlaybackAt exactly like
+// a segment click or jump-to-time, so clicking a recording gap gets the
+// same backend clamp-to-next-real-segment + gap-indicator label for free
+// (see ARCHITECTURE.md "Continuous playback across recording segments").
+// Pure fraction-of-day arithmetic, no Date object anywhere — clicking
+// still needs zero-padded digits or the built timestamp is malformed.
+async function seekTimeline(event) {
+  if (!loadedDate) return;
+  const channelId = document.getElementById('channel').value;
+  const rect = event.currentTarget.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+  const totalSec = Math.min(86399, Math.floor(frac * 86400));
+  const pad = (n) => String(n).padStart(2, '0');
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const startTime = `${loadedDate}T${pad(h)}:${pad(m)}:${pad(s)}Z`;
+  const endTime = `${loadedDate}T23:59:59Z`;
+  await startPlaybackAt(channelId, startTime, endTime, null);
+}
+
 async function downloadClip() {
   if (!currentSeg || currentChannelId == null) return;
   const startHms = document.getElementById('downloadStart').value;
@@ -319,7 +429,15 @@ document.getElementById('searchBtn').onclick = search;
 document.getElementById('jumpBtn').onclick = jumpToTime;
 document.getElementById('stopBtn').onclick = stopCurrent;
 document.getElementById('downloadBtn').onclick = downloadClip;
+document.getElementById('timeline').onclick = seekTimeline;
 document.getElementById('date').valueAsDate = new Date();
+
+// One listener for the video element's whole lifetime — it's never
+// recreated, only hls.attachMedia()/destroy() cycles around it (see
+// stopCurrent/startPlaybackAt), so re-attaching this per playback-start
+// would stack duplicate listeners across a long continuous-playback
+// session. Reads currentSeg/loadedDate fresh each time it fires.
+document.getElementById('video').addEventListener('timeupdate', updateMarker);
 
 loadChannels();
 </script>

@@ -275,6 +275,76 @@ as excess complexity for a single-user local tool — a brief ~1-2s gap
 during the source swap is accepted); an opt-out toggle (always-on by
 design).
 
+## Day timeline scrubber
+
+A horizontal bar (`static/playback.html`, `.timeline`) below the
+`<video>` element, showing the currently-loaded day's recorded
+segments as blocks and gaps as empty space, click-to-seek. Complements
+the segment list and jump-to-time rather than replacing either.
+
+**Seeking reuses `startPlaybackAt` directly** — a click computes a
+wall-clock time and calls the exact same function segment-clicks/
+jump-to-time/continuous-auto-advance already share (`seekTimeline`).
+Clicking a gap region gets the existing backend clamp-to-next-real-
+segment + "Melompati jeda rekaman" label for free, since that logic
+lives in `start_playback` (`app/main.py`) and applies to any caller —
+no new backend code for this feature at all.
+
+**Time math is pure fraction-of-day arithmetic — never a `Date`
+object** (`secondsSinceMidnight`, `seekTimeline`): click X → fraction
+of width → seconds since midnight → zero-padded H/M/S concatenated
+into the literal-digit ISO string with the loaded date. This sidesteps
+the fake-UTC subtlety entirely (nothing to reason about, since no
+`Date` is ever constructed) — stricter than the `new Date(...)`
+duration-arithmetic already used elsewhere in this file for gap
+detection and download defaults (safe there only because both operands
+share the same fake-Z offset and it cancels out in the subtraction).
+Zero-padding matters: an unpadded `5` instead of `05` would build a
+malformed timestamp string the backend can't parse correctly.
+
+A segment can start the previous calendar day and end within the
+loaded day (the DVR's segments are contiguous — see the
+22:33→00:02 example elsewhere in this doc) — `secondsSinceMidnight`
+clips both ends to `[0, 86400]` for whichever date doesn't match
+`loadedDate`, using plain string comparison on the date portion
+(works fine for `"YYYY-MM-DD"`, lexicographic order matches
+chronological order) rather than any date parsing.
+
+**Position marker**: one `timeupdate` listener attached once at page
+load, not re-attached per `startPlaybackAt` call — the `<video>`
+element is never recreated, only `hls.attachMedia`/`destroy()` cycles
+around it (`stopCurrent`/`startPlaybackAt`), so attaching per-call
+would stack duplicate listeners across a long continuous-playback
+session. Also explicitly redrawn (`updateMarker()`) at both points
+`currentSeg` gets reassigned inside `startPlaybackAt` — not solely
+relying on the next `timeupdate`, which would leave a visible window
+showing the *previous* segment's stale marker position — and inside
+`stopCurrent()`, where `currentSeg` becomes `null`; without that call
+the marker would freeze in place after Stop instead of disappearing.
+Hidden whenever nothing is playing or the playing content isn't from
+`loadedDate` (e.g. a jump-to-time to a different day than what's
+displayed).
+
+**Rendering**: segment blocks get a CSS `min-width` (2px) so short
+motion-triggered clips don't render as invisible/unclickable slivers —
+minor visual overlap on a busy day is an accepted tradeoff. Verified
+against the real DVR: a ~89-second segment (22:33:16→00:02:27,
+clipped to 0→147s of the loaded day) rendered at exactly the expected
+~2.4px, right at the floor.
+
+**Click-to-seek only**, no drag-with-live-preview — a deliberate
+simplicity tradeoff, not a limitation to fix later.
+
+Verified against the real DVR: clicking near the "12" (noon) tick
+landed on the actual segment covering that time, both the DVR's
+on-screen timestamp overlay and the marker position matched (`~50%`
+for a click near noon); the marker moved correctly in lockstep with
+`video.currentTime` when nudged past the same Chrome background-tab
+pause described in the continuous-playback section above (a testing-
+environment artifact, not a bug — confirmed by checking `video.paused`
+and `document.hidden` directly); Stop correctly clears the marker;
+segment-click and jump-to-time both regression-checked as unaffected.
+
 ## IP-proxy channels (9/10)
 
 Channels 9/10 on this DVR are ONVIF cameras proxied through it, not
