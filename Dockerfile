@@ -9,15 +9,21 @@ ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ app/
-COPY static/ static/
+# --chown up front, not a separate `chown -R` afterwards: on overlayfs,
+# chowning files that already exist in a lower layer forces a full
+# copy-up, silently doubling their size in the image (this cost a
+# ~54MB duplicate layer here before). Owning them correctly at
+# COPY/create time avoids that entirely.
+COPY --chown=appuser:appuser app/ app/
+COPY --chown=appuser:appuser static/ static/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN set -eux; \
@@ -25,21 +31,15 @@ RUN set -eux; \
       amd64|arm64) mediamtx_arch="${TARGETARCH}" ;; \
       *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    mkdir -p mediamtx; \
+    mkdir -p mediamtx tmp/downloads tmp/snapshots; \
     curl -sSL \
       "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_${mediamtx_arch}.tar.gz" \
       -o /tmp/mediamtx.tar.gz; \
     tar -xzf /tmp/mediamtx.tar.gz -C mediamtx; \
-    chmod +x mediamtx/mediamtx; \
+    chmod +x mediamtx/mediamtx /usr/local/bin/docker-entrypoint.sh; \
     rm /tmp/mediamtx.tar.gz; \
-    chmod +x /usr/local/bin/docker-entrypoint.sh
+    chown -R appuser:appuser mediamtx tmp
 
-# Non-root: app writes tmp/downloads, tmp/snapshots, and mediamtx
-# generates mediamtx/runtime.yml at startup — all need to be writable
-# by the runtime user, not just readable.
-RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
-    && mkdir -p tmp/downloads tmp/snapshots \
-    && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8896 8888 8889
