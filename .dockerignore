@@ -1,0 +1,11 @@
+.venv/
+.git/
+.claude/
+__pycache__/
+*.pyc
+tmp/
+mediamtx/
+.env
+.env.*
+!.env.example
+*.secrets.*
