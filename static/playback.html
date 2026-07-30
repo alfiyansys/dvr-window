@@ -81,6 +81,13 @@ async function loadChannels() {
   channels = (await res.json()).filter(c => c.enabled);
   const sel = document.getElementById('channel');
   sel.innerHTML = channels.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+
+  // Deep-link from the live-view overlay's "Playback" button
+  // (`/playback?channelId=<id>`) — pre-select that channel if present.
+  const requestedChannelId = new URLSearchParams(location.search).get('channelId');
+  if (requestedChannelId && channels.some(c => String(c.id) === requestedChannelId)) {
+    sel.value = requestedChannelId;
+  }
 }
 
 // The DVR's ISAPI timestamps are labeled "Z" (UTC) but are actually its
