@@ -71,6 +71,7 @@
         <span id="overlayName"></span>
         <div class="actions">
           <button id="overlaySnapshot">Snapshot 📷</button>
+          <button id="overlayPlayback">Playback ▶</button>
           <button id="overlayPrev">◂ Prev</button>
           <button id="overlayNext">Next ▸</button>
           <button id="overlayClose">Close ✕</button>
@@ -150,6 +151,11 @@ document.getElementById('overlaySnapshot').onclick = async () => {
   a.download = `snapshot_ch${overlayChannelId}_${Date.now()}.jpg`;
   a.click();
   URL.revokeObjectURL(url);
+};
+
+document.getElementById('overlayPlayback').onclick = () => {
+  if (overlayChannelId == null) return;
+  location.href = `/playback?channelId=${overlayChannelId}`;
 };
 
 function returnSlottedVideoHome() {
