@@ -91,6 +91,21 @@ config file at all anymore. See `.gitignore` before adding any new
 local/generated file that might embed credentials (mediamtx's
 generated runtime config does, for example).
 
+## Git Workflow — Branching
+
+- `main` — protected. Never commit directly; only
+  `git merge --no-ff dev` after review/smoke-test against the real DVR.
+- `dev` — staging/default branch, all work lands here first.
+- `feature/<slug>` — branch off `dev` for anything non-trivial (spans
+  more than a one-line fix); merge back with `--no-ff`, then delete.
+
+Always branch off `dev`, never `main`. Promoting to `main`:
+
+```bash
+git checkout main && git merge --no-ff dev
+git push github main && git push gitlab main
+```
+
 ## Conventions
 
 - Commit granularly — one commit per logical change/finding, not one
