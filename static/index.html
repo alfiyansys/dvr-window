@@ -282,6 +282,18 @@ function setupHlsPlayer(video, status, hlsUrl) {
   let retryMs = RETRY_MS_INITIAL;
   let retryTimer = null;
   let hls = null;
+  // Counts fatal errors since the last successful MANIFEST_PARSED.
+  // hls.js's startLoad()/recoverMediaError() fix a transient hiccup in
+  // place, but confirmed against a real outage (killed mediamtx for
+  // ~90s, then resumed it): if mediamtx tore down the HLS muxer session
+  // while it was down, startLoad() alone keeps retrying the same
+  // now-dead session id forever and gets a permanent 401 — it never
+  // re-requests the manifest to pick up a fresh session. So only the
+  // *first* fatal error of a given kind gets the cheap in-place fix;
+  // any fatal error after that (the in-place fix demonstrably didn't
+  // work) escalates to a full instance rebuild, which does re-fetch the
+  // manifest from scratch.
+  let consecutiveErrors = 0;
 
   function setStatus(text, cls) {
     status.textContent = text;
@@ -303,21 +315,24 @@ function setupHlsPlayer(video, status, hlsUrl) {
       hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => { retryMs = RETRY_MS_INITIAL; setStatus('live', 'ok'); });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { retryMs = RETRY_MS_INITIAL; consecutiveErrors = 0; setStatus('live', 'ok'); });
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+        consecutiveErrors++;
+        if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           setStatus('reconnecting…', 'loading');
           hls.startLoad();
-        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          return;
+        }
+        if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           setStatus('reconnecting…', 'loading');
           hls.recoverMediaError();
-        } else {
-          setStatus('error', 'err');
-          hls.destroy();
-          hls = null;
-          scheduleRestart();
+          return;
         }
+        setStatus('error', 'err');
+        hls.destroy();
+        hls = null;
+        scheduleRestart();
       });
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = hlsUrl;
