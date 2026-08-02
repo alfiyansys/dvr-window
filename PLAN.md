@@ -26,6 +26,7 @@ Rationale in `ARCHITECTURE.md`.
 | 7 | ✅ done | Continuous playback across recording-segment boundaries — auto-advance into the next segment instead of freezing at the end of one; skip forward over a real recording gap instead of stopping. See `ARCHITECTURE.md` "Continuous playback across recording segments". |
 | 8 | ✅ done | Day timeline scrubber for playback — horizontal bar showing the loaded day's recorded segments/gaps, click-to-seek, reusing the existing playback-start/gap-clamp mechanism. See `ARCHITECTURE.md` "Day timeline scrubber". |
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
+| 10 | ⬜ planned | Live view overlay UX: fullscreen button in the detail modal, auto-reconnect on HLS stream error. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -67,6 +68,46 @@ directly, never through FastAPI:
   Safari-native-HLS fallback path can't attach custom headers — an
   accepted, documented limitation of that already-secondary path, not
   fixed.
+
+## Phase 10 design: overlay fullscreen + stream auto-reconnect
+
+- **Fullscreen button**: new button in `.overlay-box .label .actions`
+  (`static/index.html`, alongside Snapshot/Playback/Prev/Next/Close),
+  calling `requestFullscreen()` on `.overlay-box` itself rather than
+  the bare `<video>` — the overlay already puts label/PTZ pad/zoom
+  controls beside the video (`.overlay-side`), and those need to stay
+  reachable while fullscreen, not get replaced by the browser's
+  native video-only fullscreen chrome. Toggle the button's label/icon
+  off a `fullscreenchange` listener rather than tracked state, so it
+  stays correct however fullscreen was exited (button click, `Esc`,
+  browser chrome). iOS Safari has no `Element.requestFullscreen`
+  (video-only `webkitEnterFullscreen`) — needs an explicit fallback
+  or an accepted-limitation note, confirm against a real iOS device
+  before deciding which.
+
+- **Auto-reconnect on stream error**: today `hls.on(Hls.Events.ERROR,
+  ...)` (`static/index.html`, in `main()`) only flips the per-cell
+  `.status` text to "error" on a fatal error and stops — the feed
+  stays dead until a manual page reload. Recovery needs to branch on
+  `data.type` per hls.js's own documented pattern:
+  - `NETWORK_ERROR` → `hls.startLoad()`.
+  - `MEDIA_ERROR` → `hls.recoverMediaError()`.
+  - anything else fatal → destroy and recreate the `Hls` instance,
+    with a backoff (start ~2s, cap ~30s, reset on the next successful
+    `MANIFEST_PARSED`) so a rebooting DVR doesn't get hammered at full
+    speed.
+  - Must keep working on whichever `<video>` is currently live,
+    including one already moved into `#overlaySlot` — `openOverlay()`
+    relocates the real `<video>` DOM node (not a clone), so reconnect
+    logic has to act on the existing `hls`/video reference in place,
+    not assume it's still a child of `.cell`.
+  - The Safari-native-HLS fallback path (no hls.js, plain `video.src
+    = hlsUrl`) has no `Hls.Events.ERROR` to hook — reconnect there via
+    the video element's own `error` event, reassigning `video.src`
+    after the same backoff.
+  - Give "reconnecting…" its own status state, distinct from the
+    initial "connecting…" and a terminal "error" — so glancing at the
+    grid shows actively-retrying vs. actually stuck.
 
 ## Non-goals (for now)
 
