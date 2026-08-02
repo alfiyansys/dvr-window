@@ -242,6 +242,81 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') showPrev();
 });
 
+// Owns one cell's video + status label across however many reconnects
+// it takes, so a stream error doesn't leave the feed dead until a
+// manual page reload. hls.js's own docs distinguish network vs. media
+// errors as separately recoverable in place (startLoad/
+// recoverMediaError); anything else fatal gets a full instance
+// rebuild behind a backoff (2s, doubling, capped at 30s, reset on the
+// next successful MANIFEST_PARSED) so a rebooting DVR doesn't get
+// hammered at full speed. `video` is the same DOM node throughout even
+// after openOverlay() relocates it into #overlaySlot, since that's a
+// move (appendChild), not a clone — so this instance stays valid there.
+function setupHlsPlayer(video, status, hlsUrl) {
+  const RETRY_MS_INITIAL = 2000;
+  const RETRY_MS_MAX = 30000;
+  let retryMs = RETRY_MS_INITIAL;
+  let retryTimer = null;
+  let hls = null;
+
+  function setStatus(text, cls) {
+    status.textContent = text;
+    status.className = `status ${cls}`;
+  }
+
+  function scheduleRestart() {
+    setStatus('reconnecting…', 'loading');
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => {
+      retryMs = Math.min(retryMs * 2, RETRY_MS_MAX);
+      start();
+    }, retryMs);
+  }
+
+  function start() {
+    if (Hls.isSupported()) {
+      if (hls) hls.destroy();
+      hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { retryMs = RETRY_MS_INITIAL; setStatus('live', 'ok'); });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          setStatus('reconnecting…', 'loading');
+          hls.startLoad();
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          setStatus('reconnecting…', 'loading');
+          hls.recoverMediaError();
+        } else {
+          setStatus('error', 'err');
+          hls.destroy();
+          hls = null;
+          scheduleRestart();
+        }
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = hlsUrl;
+    } else {
+      setStatus('HLS not supported', 'err');
+    }
+  }
+
+  // The native-Safari fallback path has no hls.js to hook for
+  // recoverable-vs-fatal errors, so any video error just retries the
+  // whole thing behind the same backoff. Attached once, outside
+  // start(), so repeated restarts don't stack duplicate listeners.
+  if (!Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.addEventListener('loadedmetadata', () => { retryMs = RETRY_MS_INITIAL; setStatus('live', 'ok'); });
+    video.addEventListener('error', () => {
+      setStatus('error', 'err');
+      scheduleRestart();
+    });
+  }
+
+  start();
+}
+
 async function main() {
   const res = await authFetch('/api/streams');
   const data = await res.json();
@@ -267,21 +342,7 @@ async function main() {
     const status = cell.querySelector('.status');
     const hlsUrl = `http://${location.hostname}:${data.hlsPort}${mainStream.hlsPath}`;
 
-    if (Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
-      hls.loadSource(hlsUrl);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => { status.textContent = 'live'; status.className = 'status ok'; });
-      hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (data.fatal) { status.textContent = 'error'; status.className = 'status err'; }
-      });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = hlsUrl;
-      video.addEventListener('loadedmetadata', () => { status.textContent = 'live'; status.className = 'status ok'; });
-    } else {
-      status.textContent = 'HLS not supported';
-      status.className = 'status err';
-    }
+    setupHlsPlayer(video, status, hlsUrl);
   }
 }
 
