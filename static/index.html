@@ -27,6 +27,18 @@
   .overlay-box button { cursor: pointer; color: #aaa; font-size: 14px; background: #1c1c1c; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; }
   .overlay-box button:hover { background: #2a2a2a; color: #eee; }
 
+  /* Browser fullscreen stretches the element to the viewport, but the
+     max-width/max-height above (sized for the modal look) would clip
+     it to the same box it had before — override both dimensions and
+     drop the rounded/bordered modal chrome only while fullscreen. */
+  .overlay-box:fullscreen, .overlay-box:-webkit-full-screen {
+    max-width: 100%; max-height: 100%; width: 100%; height: 100%;
+    border: none; border-radius: 0;
+  }
+  .overlay-box:fullscreen video, .overlay-box:-webkit-full-screen video {
+    max-height: 100%;
+  }
+
   .ptz { display: none; grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); gap: 4px; padding: 10px 12px; justify-content: center; }
   .ptz.open { display: grid; }
   .ptz button { padding: 0; font-size: 16px; user-select: none; }
@@ -74,6 +86,7 @@
           <button id="overlayPlayback">Playback ▶</button>
           <button id="overlayPrev">◂ Prev</button>
           <button id="overlayNext">Next ▸</button>
+          <button id="overlayFullscreen">Fullscreen ⛶</button>
           <button id="overlayClose">Close ✕</button>
         </div>
       </div>
@@ -166,7 +179,32 @@ function returnSlottedVideoHome() {
   }
 }
 
+// Standard Fullscreen API, with the -webkit- prefixed names old
+// Safari still needs (no vendor-neutral fallback for iOS Safari,
+// which only exposes video-only webkitEnterFullscreen — accepted
+// limitation, not handled here).
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function toggleFullscreen() {
+  const box = document.querySelector('.overlay-box');
+  if (!isFullscreen()) {
+    (box.requestFullscreen || box.webkitRequestFullscreen)?.call(box);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  }
+}
+
+function updateFullscreenButton() {
+  document.getElementById('overlayFullscreen').textContent = isFullscreen() ? 'Exit Fullscreen ⛶' : 'Fullscreen ⛶';
+}
+document.addEventListener('fullscreenchange', updateFullscreenButton);
+document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+document.getElementById('overlayFullscreen').onclick = toggleFullscreen;
+
 function closeOverlay() {
+  if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
   returnSlottedVideoHome();
   ptzStop();
   document.getElementById('overlay').classList.remove('open');
