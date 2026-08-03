@@ -23,9 +23,22 @@
   .overlay-box { max-width: 1280px; width: 100%; max-height: calc(100vh - 64px); background: #000; border: 1px solid #333; border-radius: 6px; overflow-x: hidden; overflow-y: auto; }
   .overlay-box video { display: block; margin: 0 auto; background: #000; max-width: 100%; max-height: 60vh; aspect-ratio: 16/9; }
   .overlay-box .label { padding: 8px 12px; font-size: 14px; color: #ddd; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .overlay-title { display: inline-flex; align-items: center; gap: 8px; }
   .overlay-box .label .actions { display: flex; gap: 8px; }
   .overlay-box button { cursor: pointer; color: #aaa; font-size: 14px; background: #1c1c1c; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; }
   .overlay-box button:hover { background: #2a2a2a; color: #eee; }
+
+  /* Browser fullscreen stretches the element to the viewport, but the
+     max-width/max-height above (sized for the modal look) would clip
+     it to the same box it had before — override both dimensions and
+     drop the rounded/bordered modal chrome only while fullscreen. */
+  .overlay-box:fullscreen, .overlay-box:-webkit-full-screen {
+    max-width: 100%; max-height: 100%; width: 100%; height: 100%;
+    border: none; border-radius: 0;
+  }
+  .overlay-box:fullscreen video, .overlay-box:-webkit-full-screen video {
+    max-height: 100%;
+  }
 
   .ptz { display: none; grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); gap: 4px; padding: 10px 12px; justify-content: center; }
   .ptz.open { display: grid; }
@@ -68,12 +81,13 @@
     </div>
     <div class="overlay-side">
       <div class="label">
-        <span id="overlayName"></span>
+        <span class="overlay-title"><span id="overlayName"></span><span id="overlayStatus" class="status loading"></span></span>
         <div class="actions">
           <button id="overlaySnapshot">Snapshot 📷</button>
           <button id="overlayPlayback">Playback ▶</button>
           <button id="overlayPrev">◂ Prev</button>
           <button id="overlayNext">Next ▸</button>
+          <button id="overlayFullscreen">Fullscreen ⛶</button>
           <button id="overlayClose">Close ✕</button>
         </div>
       </div>
@@ -93,6 +107,27 @@
 <script>
 let overlayChannelId = null;
 
+// The grid cell's own .status span is the single source of truth for a
+// channel's live/reconnecting/error state (setupHlsPlayer only ever
+// writes there — see below). The overlay doesn't move that span into
+// itself the way it moves <video>, so mirror it into #overlayStatus via
+// a MutationObserver rather than threading channel state through
+// setupHlsPlayer, which has no idea an overlay exists.
+let overlayStatusObserver = null;
+
+function syncOverlayStatus(cell) {
+  const overlayStatus = document.getElementById('overlayStatus');
+  const cellStatus = cell.querySelector('.status');
+  const copy = () => {
+    overlayStatus.textContent = cellStatus.textContent;
+    overlayStatus.className = cellStatus.className;
+  };
+  copy();
+  if (overlayStatusObserver) overlayStatusObserver.disconnect();
+  overlayStatusObserver = new MutationObserver(copy);
+  overlayStatusObserver.observe(cellStatus, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+}
+
 function openOverlay(cell, name, channelId, ptzEnabled) {
   const slot = document.getElementById('overlaySlot');
   const video = cell.querySelector('video');
@@ -100,6 +135,7 @@ function openOverlay(cell, name, channelId, ptzEnabled) {
   video._homeCell = cell;
   slot.appendChild(video);
   document.getElementById('overlayName').textContent = name;
+  syncOverlayStatus(cell);
   overlayChannelId = channelId;
   document.getElementById('overlay').classList.add('open');
   document.getElementById('ptzPad').classList.toggle('open', !!ptzEnabled);
@@ -166,9 +202,35 @@ function returnSlottedVideoHome() {
   }
 }
 
+// Standard Fullscreen API, with the -webkit- prefixed names old
+// Safari still needs (no vendor-neutral fallback for iOS Safari,
+// which only exposes video-only webkitEnterFullscreen — accepted
+// limitation, not handled here).
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function toggleFullscreen() {
+  const box = document.querySelector('.overlay-box');
+  if (!isFullscreen()) {
+    (box.requestFullscreen || box.webkitRequestFullscreen)?.call(box);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  }
+}
+
+function updateFullscreenButton() {
+  document.getElementById('overlayFullscreen').textContent = isFullscreen() ? 'Exit Fullscreen ⛶' : 'Fullscreen ⛶';
+}
+document.addEventListener('fullscreenchange', updateFullscreenButton);
+document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+document.getElementById('overlayFullscreen').onclick = toggleFullscreen;
+
 function closeOverlay() {
+  if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
   returnSlottedVideoHome();
   ptzStop();
+  if (overlayStatusObserver) { overlayStatusObserver.disconnect(); overlayStatusObserver = null; }
   document.getElementById('overlay').classList.remove('open');
 }
 
@@ -204,6 +266,181 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') showPrev();
 });
 
+// Owns one cell's video + status label across however many reconnects
+// it takes, so a stream error doesn't leave the feed dead until a
+// manual page reload. hls.js's own docs distinguish network vs. media
+// errors as separately recoverable in place (startLoad/
+// recoverMediaError); anything else fatal gets a full instance
+// rebuild behind a backoff (2s, doubling, capped at 30s, reset on the
+// next successful MANIFEST_PARSED) so a rebooting DVR doesn't get
+// hammered at full speed. `video` is the same DOM node throughout even
+// after openOverlay() relocates it into #overlaySlot, since that's a
+// move (appendChild), not a clone — so this instance stays valid there.
+function setupHlsPlayer(video, status, hlsUrl) {
+  const RETRY_MS_INITIAL = 2000;
+  const RETRY_MS_MAX = 30000;
+  let retryMs = RETRY_MS_INITIAL;
+  let retryTimer = null;
+  let hls = null;
+  // Counts fatal errors since the last successful MANIFEST_PARSED.
+  // hls.js's startLoad()/recoverMediaError() fix a transient hiccup in
+  // place, but confirmed against a real outage (killed mediamtx for
+  // ~90s, then resumed it): if mediamtx tore down the HLS muxer session
+  // while it was down, startLoad() alone keeps retrying the same
+  // now-dead session id forever and gets a permanent 401 — it never
+  // re-requests the manifest to pick up a fresh session. So only the
+  // *first* fatal error of a given kind gets the cheap in-place fix;
+  // any fatal error after that (the in-place fix demonstrably didn't
+  // work) escalates to a full instance rebuild, which does re-fetch the
+  // manifest from scratch.
+  let consecutiveErrors = 0;
+
+  function setStatus(text, cls) {
+    status.textContent = text;
+    status.className = `status ${cls}`;
+  }
+
+  function scheduleRestart() {
+    setStatus('reconnecting…', 'loading');
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => {
+      retryMs = Math.min(retryMs * 2, RETRY_MS_MAX);
+      start();
+    }, retryMs);
+  }
+
+  // A stream can be "connected" with no fatal hls.js error yet still
+  // useless — a DVR-side encoder hiccup or a slow upstream link can
+  // stall decoded frames without hls.js's own buffer/network logic
+  // ever calling it fatal, so the ERROR handler below never fires.
+  // video.currentTime not advancing is the actual ground truth for
+  // "is this frame stuck", regardless of what hls.js/the network layer
+  // thinks. Implemented as two chained one-shot timers reset on every
+  // `timeupdate` rather than a polling loop — costs nothing while the
+  // stream is healthy (timeupdate fires that often on its own), and
+  // only does anything once playback has actually gone quiet.
+  //
+  // Thresholds deliberately generous: some channels here (the IP-proxy
+  // cameras) reach the DVR over a multi-hop wireless link, not a wired
+  // one, so multi-second jitter/dropout is normal and often self-heals
+  // — confirmed against this deployment's own ffmpeg transcode log
+  // (dup=/drop= counters climbing under load without the stream ever
+  // fully dying). Rebuilding the local HLS pipeline doesn't fix a slow
+  // upstream wireless hop anyway, so escalating to a rebuild too
+  // eagerly would just add local churn on top of an already-strained
+  // link instead of helping. A genuinely dead stream is still caught —
+  // just after a longer, less trigger-happy grace period.
+  const LAG_STATUS_MS = 10000;
+  const LAG_REBUILD_MS = 15000;
+  let lagStatusTimer = null;
+  let lagRebuildTimer = null;
+
+  function clearLagTimers() {
+    clearTimeout(lagStatusTimer); lagStatusTimer = null;
+    clearTimeout(lagRebuildTimer); lagRebuildTimer = null;
+  }
+
+  function armLagWatchdog() {
+    clearLagTimers();
+    // Backgrounded tabs get their rendering/decoding throttled by the
+    // browser itself, which looks identical to a real stall — don't
+    // even start the countdown while hidden (see visibilitychange
+    // listener below, which re-arms with a fresh window on return).
+    if (document.visibilityState !== 'visible') return;
+    lagStatusTimer = setTimeout(() => {
+      setStatus('lagging…', 'loading');
+      lagRebuildTimer = setTimeout(() => {
+        if (hls) { hls.destroy(); hls = null; }
+        scheduleRestart();
+      }, LAG_REBUILD_MS);
+    }, LAG_STATUS_MS);
+  }
+
+  function start() {
+    clearLagTimers();
+    if (Hls.isSupported()) {
+      if (hls) hls.destroy();
+      hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { retryMs = RETRY_MS_INITIAL; consecutiveErrors = 0; });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal) return;
+        clearLagTimers();
+        consecutiveErrors++;
+        if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          setStatus('reconnecting…', 'loading');
+          hls.startLoad();
+          return;
+        }
+        if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          setStatus('reconnecting…', 'loading');
+          hls.recoverMediaError();
+          return;
+        }
+        setStatus('error', 'err');
+        hls.destroy();
+        hls = null;
+        scheduleRestart();
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = hlsUrl;
+    } else {
+      setStatus('HLS not supported', 'err');
+    }
+  }
+
+  // "live" is only trustworthy once frames are actually rendering —
+  // MANIFEST_PARSED (or, on the Safari-native path, loadedmetadata)
+  // fires well before that, so setting "live" there was a lie the lag
+  // watchdog couldn't tell apart from the real thing: confirmed for
+  // real on channel 9/10 (multi-hop wireless), where a rebuild landed
+  // MANIFEST_PARSED with the manifest structure in place but zero
+  // actual media flowing yet, and the grid showed "live" for a
+  // stalled video (paused=true, currentTime stuck at 0) until the lag
+  // watchdog eventually caught up. `playing` — standard, fires
+  // identically whether hls.js or native HLS is driving the element —
+  // is the actual "frames are flowing" signal, so that's the one
+  // place "live" gets set from here on.
+  video.addEventListener('playing', () => {
+    setStatus('live', 'ok');
+    armLagWatchdog();
+  });
+  // currentTime actually advancing is the ground truth for "still
+  // playing fine" regardless of what hls.js/network state says, so
+  // reassert "live" on every timeupdate too — not just re-arm the
+  // watchdog — or a stream that stutters (keeps progressing, just
+  // slower than LAG_STATUS_MS) would get stuck showing "lagging…"
+  // forever: each fresh timeupdate would cancel the pending escalation
+  // without ever reverting the label. Confirmed this happens for real
+  // against channel 9/10's H.265->H.264 transcode, which genuinely
+  // drops/duplicates frames under load (see ffmpeg's own `dup=`/
+  // `drop=` counters in the run.sh log) without ever fully stalling.
+  video.addEventListener('timeupdate', () => {
+    setStatus('live', 'ok');
+    armLagWatchdog();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') armLagWatchdog();
+    else clearLagTimers();
+  });
+
+  // The native-Safari fallback path has no hls.js to hook for
+  // recoverable-vs-fatal errors, so any video error just retries the
+  // whole thing behind the same backoff. Attached once, outside
+  // start(), so repeated restarts don't stack duplicate listeners.
+  if (!Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.addEventListener('loadedmetadata', () => { retryMs = RETRY_MS_INITIAL; });
+    video.addEventListener('error', () => {
+      clearLagTimers();
+      setStatus('error', 'err');
+      scheduleRestart();
+    });
+  }
+
+  start();
+}
+
 async function main() {
   const res = await authFetch('/api/streams');
   const data = await res.json();
@@ -229,21 +466,7 @@ async function main() {
     const status = cell.querySelector('.status');
     const hlsUrl = `http://${location.hostname}:${data.hlsPort}${mainStream.hlsPath}`;
 
-    if (Hls.isSupported()) {
-      const hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
-      hls.loadSource(hlsUrl);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => { status.textContent = 'live'; status.className = 'status ok'; });
-      hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (data.fatal) { status.textContent = 'error'; status.className = 'status err'; }
-      });
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = hlsUrl;
-      video.addEventListener('loadedmetadata', () => { status.textContent = 'live'; status.className = 'status ok'; });
-    } else {
-      status.textContent = 'HLS not supported';
-      status.className = 'status err';
-    }
+    setupHlsPlayer(video, status, hlsUrl);
   }
 }
 
