@@ -8,8 +8,6 @@ build-image:
     - docker:27-dind
   variables:
     DOCKER_TLS_CERTDIR: "/certs"
-    # Needed for the Dockerfile's ARG TARGETARCH to actually get
-    # populated (classic docker build leaves it empty).
     DOCKER_BUILDKIT: "1"
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
