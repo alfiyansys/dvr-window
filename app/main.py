@@ -1,3 +1,5 @@
+import asyncio
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -133,6 +135,7 @@ def _build_ip_channel(isapi: ISAPIClient, proxy_channel: dict, streaming_channel
     # proxy channel since it's the same ISAPI mechanism. See
     # ARCHITECTURE.md "PTZ for IP-proxy channels".
     ptz = {"enabled": True, "controlProtocol": "ONVIF"} if enabled else None
+    source = proxy_channel["sourceInputPortDescriptor"]
 
     return {
         "id": channel_id,
@@ -141,6 +144,12 @@ def _build_ip_channel(isapi: ISAPIClient, proxy_channel: dict, streaming_channel
         "resolution": f"{streams[0]['width']}*{streams[0]['height']}" if streams else "NO VIDEO",
         "streams": streams,
         "ptz": ptz,
+        # Only IP-proxy channels have a network hop to measure — analog
+        # channels (_build_channel above) never set these, which is what
+        # get_ping below uses to tell the two apart generically, not a
+        # hardcoded channel id.
+        "ipAddress": source["ipAddress"],
+        "managePort": int(source["managePortNo"]),
     }
 
 
@@ -182,6 +191,42 @@ def get_streams():
         })
 
     return {"hlsPort": HLS_PORT, "webrtcPort": WEBRTC_PORT, "channels": channels}
+
+
+async def _tcp_ping(host: str, port: int, timeout: float = 2.0) -> float | None:
+    """Round-trip time of a bare TCP connect, as a network-responsiveness
+    proxy for a camera — the DVR's own ISAPI has no ping/network-delay
+    endpoint on this firmware (confirmed: `/ISAPI/System/Network/ping` and
+    `/testNetworkDelay` both 404), so this measures the backend's own path
+    to the camera's ONVIF manage port instead of the DVR's. Not literally
+    ICMP: a plain TCP connect needs no elevated container privileges
+    (CAP_NET_RAW), unlike raw ICMP sockets, and is close enough to ICMP RTT
+    for a LAN link. None on timeout/refused/unreachable rather than
+    raising — a single unreachable camera shouldn't break the whole
+    response for the others being pinged concurrently."""
+    start = time.monotonic()
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    elapsed_ms = (time.monotonic() - start) * 1000
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return round(elapsed_ms, 1)
+
+
+@app.get("/api/ping")
+async def get_ping():
+    """Only IP-proxy channels (ipAddress set by _build_ip_channel) have a
+    network hop to measure — generic to however many a given DVR has, not
+    hardcoded to channels 9/10 on this one. Pinged concurrently so one slow/
+    unreachable camera doesn't delay the others."""
+    targets = [ch for ch in app.state.channels if ch.get("ipAddress")]
+    results = await asyncio.gather(*[_tcp_ping(ch["ipAddress"], ch["managePort"]) for ch in targets])
+    return {"channels": [{"id": ch["id"], "pingMs": ms} for ch, ms in zip(targets, results)]}
 
 
 def _main_track_id(channel_id: int) -> int:

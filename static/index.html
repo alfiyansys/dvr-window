@@ -12,8 +12,13 @@
   .cell { background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; cursor: pointer; }
   .cell:hover { border-color: #666; }
   .cell video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; pointer-events: none; }
-  .cell .label { padding: 6px 10px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; }
+  .cell .label { padding: 6px 10px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+  .cell .label .right { display: flex; align-items: baseline; gap: 6px; }
   .cell .status { font-size: 11px; }
+  /* Empty (no ipAddress on this channel, or no ping response yet) stays
+     visually absent rather than an empty gap in the flex row. */
+  .cell .ping:empty { display: none; }
+  .cell .ping { font-size: 11px; color: #666; }
   .status.ok { color: #4ade80; }
   .status.err { color: #f87171; }
   .status.loading { color: #fbbf24; }
@@ -526,7 +531,7 @@ async function main() {
     cell.dataset.ptzEnabled = ch.ptzEnabled ? 'true' : 'false';
     cell.innerHTML = `
       <video muted autoplay playsinline></video>
-      <div class="label"><span>${ch.name}</span><span class="status loading">connecting…</span></div>
+      <div class="label"><span>${ch.name}</span><span class="right"><span class="ping"></span><span class="status loading">connecting…</span></span></div>
     `;
     grid.appendChild(cell);
     cell.onclick = () => openOverlay(cell, ch.name, ch.id, ch.ptzEnabled);
@@ -537,6 +542,34 @@ async function main() {
 
     setupHlsPlayer(video, status, hlsUrl);
   }
+
+  pingLoop();
+}
+
+// TCP-connect-time to each IP-proxy camera's own ONVIF manage port — the
+// DVR's ISAPI has no ping/network-delay endpoint on this firmware (see
+// app/main.py's get_ping), so this is the backend's own path to the
+// camera, not literally the DVR's. Analog channels never appear in the
+// response (no ipAddress to ping — see _build_ip_channel), so their .ping
+// span just stays empty (:empty CSS rule above hides it entirely) rather
+// than needing a separate "not applicable" state.
+const PING_INTERVAL_MS = 5000;
+
+async function pingLoop() {
+  try {
+    const res = await authFetch('/api/ping');
+    const data = await res.json();
+    for (const { id, pingMs } of data.channels) {
+      const cell = document.querySelector(`.cell[data-channel-id="${id}"]`);
+      const pingEl = cell?.querySelector('.ping');
+      if (pingEl) pingEl.textContent = pingMs == null ? '' : `${pingMs}ms`;
+    }
+  } catch {
+    // Transient failure (e.g. a 401 mid-debounced-reprompt from authFetch)
+    // — just skip this cycle, the next one retries on its own rather than
+    // needing its own backoff/retry logic like the video players have.
+  }
+  setTimeout(pingLoop, PING_INTERVAL_MS);
 }
 
 ensureAuthKey().then(main);
