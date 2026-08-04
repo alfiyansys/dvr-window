@@ -16,9 +16,10 @@
   .cell .label .right { display: flex; align-items: baseline; gap: 6px; }
   .cell .status { font-size: 11px; }
   /* Empty (no ipAddress on this channel, or no ping response yet) stays
-     visually absent rather than an empty gap in the flex row. */
-  .cell .ping:empty { display: none; }
-  .cell .ping { font-size: 11px; color: #666; }
+     visually absent rather than an empty gap in the flex row — shared
+     with #overlayPing below, not just the grid cell. */
+  .ping:empty { display: none; }
+  .ping { font-size: 11px; color: #666; }
   .status.ok { color: #4ade80; }
   .status.err { color: #f87171; }
   .status.loading { color: #fbbf24; }
@@ -28,7 +29,10 @@
   .overlay-box { max-width: 1280px; width: 100%; max-height: calc(100vh - 64px); background: #000; border: 1px solid #333; border-radius: 6px; overflow-x: hidden; overflow-y: auto; }
   .overlay-box video { display: block; margin: 0 auto; background: #000; max-width: 100%; max-height: 60vh; aspect-ratio: 16/9; }
   .overlay-box .label { padding: 8px 12px; font-size: 14px; color: #ddd; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .overlay-title { display: inline-flex; align-items: center; gap: 8px; }
+  /* Stacked vertically (name / status / latency), not inline — a
+     narrow-viewport screenshot showed "Teras live" run together on one
+     line, which only gets worse once a latency line joins them. */
+  .overlay-title { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
   .overlay-box .label .actions { display: flex; gap: 8px; }
   /* Prev/Next stay on one row, each filling half the row's width, even
      when the parent .actions list is stacked into a column on desktop
@@ -93,7 +97,7 @@
     </div>
     <div class="overlay-side">
       <div class="label">
-        <span class="overlay-title"><span id="overlayName"></span><span id="overlayStatus" class="status loading"></span></span>
+        <span class="overlay-title"><span id="overlayName"></span><span id="overlayStatus" class="status loading"></span><span id="overlayPing" class="ping"></span></span>
         <div class="actions">
           <button id="overlaySnapshot">Snapshot 📷</button>
           <button id="overlayPlayback">Playback ▶</button>
@@ -142,6 +146,21 @@ function syncOverlayStatus(cell) {
   overlayStatusObserver.observe(cellStatus, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['class'] });
 }
 
+// Same mirroring approach as syncOverlayStatus above, for the cell's
+// .ping span (written by pingLoop() below) — no class ever changes on
+// it, so only childList/characterData need watching, not attributes.
+let overlayPingObserver = null;
+
+function syncOverlayPing(cell) {
+  const overlayPing = document.getElementById('overlayPing');
+  const cellPing = cell.querySelector('.ping');
+  const copy = () => { overlayPing.textContent = cellPing.textContent; };
+  copy();
+  if (overlayPingObserver) overlayPingObserver.disconnect();
+  overlayPingObserver = new MutationObserver(copy);
+  overlayPingObserver.observe(cellPing, { childList: true, characterData: true, subtree: true });
+}
+
 function openOverlay(cell, name, channelId, ptzEnabled) {
   const slot = document.getElementById('overlaySlot');
   const video = cell.querySelector('video');
@@ -150,6 +169,7 @@ function openOverlay(cell, name, channelId, ptzEnabled) {
   slot.appendChild(video);
   document.getElementById('overlayName').textContent = name;
   syncOverlayStatus(cell);
+  syncOverlayPing(cell);
   overlayChannelId = channelId;
   document.getElementById('overlay').classList.add('open');
   document.getElementById('ptzPad').classList.toggle('open', !!ptzEnabled);
@@ -245,6 +265,7 @@ function closeOverlay() {
   returnSlottedVideoHome();
   ptzStop();
   if (overlayStatusObserver) { overlayStatusObserver.disconnect(); overlayStatusObserver = null; }
+  if (overlayPingObserver) { overlayPingObserver.disconnect(); overlayPingObserver = null; }
   document.getElementById('overlay').classList.remove('open');
 }
 
