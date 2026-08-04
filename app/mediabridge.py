@@ -230,8 +230,17 @@ class MediaBridge:
         # comment / mediamtx/base.yml), so this needs real credentials
         # regardless of whether mediamtx is self-managed or a separate
         # Swarm service.
+        #
+        # `replace`, not `add`: confirmed directly against a running
+        # mediamtx that `add` 400s if the path already exists, which it
+        # will on every dvr-window restart in network mode where
+        # mediamtx itself didn't also restart (e.g. a rolling redeploy
+        # of just this service) — start()'s network-mode branch would
+        # otherwise crash app startup every time. `replace` is a true
+        # upsert (tested against both an already-existing and a
+        # brand-new path name, 200 either way).
         resp = httpx.post(
-            f"http://{MEDIAMTX_HOST}:{API_PORT}/v3/config/paths/add/{name}",
+            f"http://{MEDIAMTX_HOST}:{API_PORT}/v3/config/paths/replace/{name}",
             json=path_config,
             auth=(MEDIAMTX_BACKEND_USER, AUTH_KEY),
             timeout=5.0,
