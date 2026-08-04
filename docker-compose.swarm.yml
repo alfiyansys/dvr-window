@@ -4,8 +4,56 @@ services:
     environment:
       - HIKVISION_HOST=${HIKVISION_HOST}
       - HIKVISION_USERNAME=${HIKVISION_USERNAME}
+      # Explicit host, not the default 127.0.0.1 - this is what tells
+      # app/mediabridge.py to run in network mode (talk to the mediamtx
+      # service over the overlay network) instead of self-managing a
+      # local subprocess. See PLAN.md "Chosen fix: split mediamtx into
+      # its own Swarm service".
+      - MEDIAMTX_HOST=mediamtx
     secrets:
       - hikvision_password
+      - auth_key
+    networks:
+      - traefik-public
+    depends_on:
+      - mediamtx
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.dvr-window.rule=Host(`${DVR_DOMAIN}`)
+        - traefik.http.routers.dvr-window.entrypoints=web
+        - traefik.http.services.dvr-window.loadbalancer.server.port=8896
+      restart_policy:
+        condition: on-failure
+
+  mediamtx:
+    # -ffmpeg tag (Alpine-based), not the default `FROM scratch` tag -
+    # required so mediamtx's own runOnDemand H.265->H.264 transcode
+    # (_transcode_path in app/mediabridge.py) has an ffmpeg to spawn
+    # inside this container, and incidentally provides the shell
+    # entrypoint.sh needs. See PLAN.md for both.
+    image: bluenviron/mediamtx:1.19.3-ffmpeg
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    configs:
+      - source: mediamtx_base_config
+        target: /config/mediamtx.yml
+      - source: mediamtx_entrypoint
+        target: /entrypoint.sh
+        mode: 0555
+    secrets:
       - auth_key
     ports:
       - "8888:8888"
@@ -17,6 +65,15 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      # nc -z (TCP-connect-only) rather than curl/wget - confirmed the
+      # image has no curl, and wget treats mediamtx's 404 on `/` as a
+      # failed healthcheck even though mediamtx itself is fine.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8888 && nc -z 127.0.0.1 9997"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     deploy:
       replicas: 1
       resources:
@@ -26,11 +83,6 @@ services:
         reservations:
           cpus: "0.1"
           memory: 128M
-      labels:
-        - traefik.enable=true
-        - traefik.http.routers.dvr-window.rule=Host(`${DVR_DOMAIN}`)
-        - traefik.http.routers.dvr-window.entrypoints=web
-        - traefik.http.services.dvr-window.loadbalancer.server.port=8896
       restart_policy:
         condition: on-failure
 
@@ -43,3 +95,9 @@ secrets:
     external: true
   auth_key:
     external: true
+
+configs:
+  mediamtx_base_config:
+    file: ./mediamtx/base.yml
+  mediamtx_entrypoint:
+    file: ./mediamtx/entrypoint.sh

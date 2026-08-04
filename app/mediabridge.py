@@ -24,14 +24,28 @@ WEBRTC_PORT = int(os.environ.get("MEDIAMTX_WEBRTC_PORT", 8889))
 API_PORT = int(os.environ.get("MEDIAMTX_API_PORT", 9997))
 RTSP_PORT = int(os.environ.get("MEDIAMTX_RTSP_PORT", 8554))
 
+# Unset (bare-metal run.sh, or a single-container deployment) means
+# "127.0.0.1, and this MediaBridge spawns/owns the mediamtx process
+# itself" — today's behavior, unchanged. Explicitly set (the Swarm
+# split — MEDIAMTX_HOST=mediamtx, see docker-compose.swarm.yml) means
+# mediamtx runs in its own container/service already managing itself;
+# this MediaBridge only talks to it over the network and pushes paths
+# via its config API instead of spawning/writing its config file. See
+# PLAN.md "Chosen fix: split mediamtx into its own Swarm service".
+_env_mediamtx_host = os.environ.get("MEDIAMTX_HOST")
+MEDIAMTX_HOST = _env_mediamtx_host or "127.0.0.1"
+MEDIAMTX_SELF_MANAGED = _env_mediamtx_host is None
+
 # Gates mediamtx's own HLS/WebRTC listeners with the same AUTH_KEY the
 # FastAPI side uses (see app/main.py) — video flows DVR -> mediamtx ->
 # browser directly, never through FastAPI, so protecting only the API
 # wouldn't secure the live view. AUTH_KEY presence is already validated
 # by app.config.load_settings() before this module's start() ever runs.
-# The username isn't a secret (AUTH_KEY is) — fixed since there's
-# exactly one caller class (this app's own frontend).
+# Usernames aren't secrets (AUTH_KEY is) — fixed since there's exactly
+# one caller class per role (this app's own frontend for `viewer`,
+# this app's own backend for `backend`).
 MEDIAMTX_AUTH_USER = "viewer"
+MEDIAMTX_BACKEND_USER = "backend"
 AUTH_KEY = os.environ.get("AUTH_KEY")
 
 
@@ -94,6 +108,20 @@ class MediaBridge:
         paths = _build_paths(device, channels)
         self.stream_names = list(paths.keys())
 
+        if not MEDIAMTX_SELF_MANAGED:
+            # mediamtx is already running as its own Swarm service (see
+            # docker-compose.swarm.yml/mediamtx/base.yml) — just wait
+            # for it and push this deployment's live-view paths onto
+            # it, the same pattern add_playback_path already uses for
+            # playback paths.
+            self._wait_until_ready()
+            for name, path_config in paths.items():
+                self._add_path(name, path_config)
+            return
+
+        self._start_self_managed(paths)
+
+    def _start_self_managed(self, paths: dict) -> None:
         config = {
             "logLevel": "info",
             # RTSP re-serve is loopback-only and exists purely so the
@@ -114,28 +142,30 @@ class MediaBridge:
             "hlsAddress": f":{HLS_PORT}",
             "webrtcAddress": f":{WEBRTC_PORT}",
             # authInternalUsers REPLACES mediamtx's own default user list,
-            # it doesn't merge with it. mediamtx's stock config ships two
-            # entries: an unrestricted one covering publish/read/playback,
-            # and a *separate* one scoped to loopback IPs covering only
-            # api/metrics/pprof with no password. The second entry's
-            # *shape* (IP-restricted, passwordless, narrow actions) is
-            # kept and reused for our own internal loopback processes
-            # below, rather than copied verbatim — extended to `publish`
-            # too (not `read`: unlike `api`/`publish`, which only this
-            # app's own local processes ever need, `read` is exactly what
-            # real remote LAN viewers need to go through the `viewer`
-            # credential for, so it deliberately stays out of the
-            # loopback exemption):
-            #   - add_playback_path/remove_playback_path (control API,
-            #     127.0.0.1:9997) need `api`, sent with no credentials.
-            #   - the H.265 transcode's ffmpeg (_transcode_path below)
-            #     publishes into this same RTSP server from 127.0.0.1
-            #     (spawned locally by mediamtx's own runOnDemand) and
-            #     needs `publish`, also with no credentials.
-            #   - capture_clip's ffmpeg *reads* from the RTSP re-serve —
-            #     needs `read`, which is NOT in this loopback-exempt
-            #     entry, so it explicitly authenticates as `viewer`
-            #     instead (see capture_clip below).
+            # it doesn't merge with it (confirmed directly against the
+            # binary — env-var overrides merge onto the compiled-in
+            # defaults per-index instead, which is why the Swarm-split
+            # deployment's own config, mediamtx/base.yml, uses a full
+            # file too rather than env vars — see PLAN.md). Same 3-entry
+            # shape as that file, kept identical here so self-managed
+            # (bare-metal/single-container) and network mode (the Swarm
+            # split) behave the same way:
+            #   - `viewer`/read: real LAN browsers, via static/auth.js.
+            #   - `backend`/api: add_playback_path/remove_playback_path
+            #     and (network mode only) pushing this same `paths` dict
+            #     after boot — see MediaBridge.start(). Unrestricted by
+            #     IP: in network mode these calls come from a different
+            #     container's overlay-network IP, not loopback, so it
+            #     can't be an IP-based exemption the way it used to be.
+            #   - `any`/publish, loopback-only, passwordless: the H.265
+            #     transcode's ffmpeg (_transcode_path below) publishing
+            #     back into this same RTSP server — always spawned by
+            #     mediamtx itself in its own process/container, so this
+            #     one stays genuinely loopback in both modes.
+            # capture_clip's ffmpeg *reads* from the RTSP re-serve —
+            # needs `read`, not covered by any of the above, so it
+            # explicitly authenticates as `viewer` instead (see
+            # capture_clip below).
             "authMethod": "internal",
             "authInternalUsers": [
                 {
@@ -145,13 +175,16 @@ class MediaBridge:
                     "permissions": [{"action": "read", "path": ""}],
                 },
                 {
+                    "user": MEDIAMTX_BACKEND_USER,
+                    "pass": AUTH_KEY,
+                    "ips": [],
+                    "permissions": [{"action": "api", "path": ""}],
+                },
+                {
                     "user": "any",
                     "pass": "",
                     "ips": ["127.0.0.1", "::1"],
-                    "permissions": [
-                        {"action": "api", "path": ""},
-                        {"action": "publish", "path": ""},
-                    ],
+                    "permissions": [{"action": "publish", "path": ""}],
                 },
             ],
             "paths": paths,
@@ -165,11 +198,16 @@ class MediaBridge:
 
         self._wait_until_ready()
 
-    def _wait_until_ready(self, timeout: float = 10.0) -> None:
+    def _wait_until_ready(self, timeout: float = 30.0) -> None:
+        # Longer than self-managed mode strictly needs (mediamtx starts
+        # in well under a second as a local subprocess) — network mode
+        # (the Swarm split) also has to tolerate mediamtx's own image
+        # still being pulled/scheduled on a cold `docker stack deploy`,
+        # since Swarm doesn't guarantee inter-service start order.
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                httpx.get(f"http://127.0.0.1:{HLS_PORT}/", timeout=1.0)
+                httpx.get(f"http://{MEDIAMTX_HOST}:{HLS_PORT}/", timeout=1.0)
                 return
             except httpx.HTTPError:
                 time.sleep(0.2)
@@ -184,16 +222,40 @@ class MediaBridge:
                 self._proc.kill()
             self._proc = None
 
-    def add_playback_path(self, name: str, source_url: str) -> None:
+    def _add_path(self, name: str, path_config: dict) -> None:
+        # Shared by add_playback_path below and by start()'s network-mode
+        # branch, which pushes the live-view paths the same way. Always
+        # authenticates as `backend` — no loopback exemption for `api`
+        # in either mode's authInternalUsers now (see start()'s config
+        # comment / mediamtx/base.yml), so this needs real credentials
+        # regardless of whether mediamtx is self-managed or a separate
+        # Swarm service.
+        #
+        # `replace`, not `add`: confirmed directly against a running
+        # mediamtx that `add` 400s if the path already exists, which it
+        # will on every dvr-window restart in network mode where
+        # mediamtx itself didn't also restart (e.g. a rolling redeploy
+        # of just this service) — start()'s network-mode branch would
+        # otherwise crash app startup every time. `replace` is a true
+        # upsert (tested against both an already-existing and a
+        # brand-new path name, 200 either way).
         resp = httpx.post(
-            f"http://127.0.0.1:{API_PORT}/v3/config/paths/add/{name}",
-            json={"source": source_url, "sourceOnDemand": True},
+            f"http://{MEDIAMTX_HOST}:{API_PORT}/v3/config/paths/replace/{name}",
+            json=path_config,
+            auth=(MEDIAMTX_BACKEND_USER, AUTH_KEY),
             timeout=5.0,
         )
         resp.raise_for_status()
 
+    def add_playback_path(self, name: str, source_url: str) -> None:
+        self._add_path(name, {"source": source_url, "sourceOnDemand": True})
+
     def remove_playback_path(self, name: str) -> None:
-        httpx.delete(f"http://127.0.0.1:{API_PORT}/v3/config/paths/delete/{name}", timeout=5.0)
+        httpx.delete(
+            f"http://{MEDIAMTX_HOST}:{API_PORT}/v3/config/paths/delete/{name}",
+            auth=(MEDIAMTX_BACKEND_USER, AUTH_KEY),
+            timeout=5.0,
+        )
 
     def capture_clip(self, name: str, duration_seconds: float, output_path: Path) -> None:
         """Capture `duration_seconds` of video from a playback path into an
@@ -214,7 +276,7 @@ class MediaBridge:
         cmd = [
             "ffmpeg", "-y", "-v", "warning",
             "-rtsp_transport", "tcp",
-            "-i", f"rtsp://{MEDIAMTX_AUTH_USER}:{AUTH_KEY}@127.0.0.1:{RTSP_PORT}/{name}",
+            "-i", f"rtsp://{MEDIAMTX_AUTH_USER}:{AUTH_KEY}@{MEDIAMTX_HOST}:{RTSP_PORT}/{name}",
             "-t", str(duration_seconds),
             "-c:v", "copy", "-an",
             str(output_path),
@@ -235,7 +297,7 @@ class MediaBridge:
         visibly distorted snapshot. Grabbing a frame from the same
         stream the live view actually plays avoids this entirely.
         """
-        url = f"rtsp://{MEDIAMTX_AUTH_USER}:{AUTH_KEY}@127.0.0.1:{RTSP_PORT}/{name}"
+        url = f"rtsp://{MEDIAMTX_AUTH_USER}:{AUTH_KEY}@{MEDIAMTX_HOST}:{RTSP_PORT}/{name}"
 
         fast_cmd = [
             "ffmpeg", "-y", "-v", "warning",
