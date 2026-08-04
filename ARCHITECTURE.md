@@ -39,7 +39,9 @@ MEDIA PLANE (live view + playback)
 
   DVR :554 (RTSP)  -- RTSP -->  Media bridge: mediamtx  -- HLS / WebRTC -->  Browser <video>
                                 app/mediabridge.py
-                                (sidecar process)
+                                (subprocess, bare metal / dev — its own
+                                 Swarm service in production, see
+                                 "mediamtx as a separate Swarm service")
 ```
 
 `<video>` in the browser talks to mediamtx directly on its own ports
@@ -52,8 +54,10 @@ HLS+WebRTC-out, has a runtime control API for dynamic paths) instead
 of writing our own RTSP-to-browser transcoder.
 
 - **Backend** (`app/`): config loading (`config.py`), ISAPI client
-  (`isapi.py`), mediamtx process + dynamic path management
-  (`mediabridge.py`), FastAPI routes (`main.py`).
+  (`isapi.py`), mediamtx process/service + dynamic path management
+  (`mediabridge.py` — self-managed subprocess or a separate Swarm
+  service depending on deployment, see below), FastAPI routes
+  (`main.py`).
 - **Frontend** (`static/`): plain HTML/JS, no build step. `index.html`
   (live grid), `playback.html` (search + play recordings). hls.js
   vendored locally (no CDN dependency, keeps the local service
@@ -112,14 +116,33 @@ of writing our own RTSP-to-browser transcoder.
 
 ## Media bridge design
 
-mediamtx is spawned as a child process by the backend (`MediaBridge` in
-`app/mediabridge.py`). Its YAML config is generated at startup from the
-live channel list and written to a gitignored runtime path (it embeds
-DVR credentials in RTSP source URLs — must never be committed). The
-four ports below are this sidecar's own local listeners, not DVR
+`MediaBridge` (`app/mediabridge.py`) manages mediamtx in one of two
+modes, chosen by whether `MEDIAMTX_HOST` is set:
+
+- **Self-managed** (`MEDIAMTX_HOST` unset, defaults to `127.0.0.1`) —
+  bare-metal (`run.sh`) and local dev. mediamtx is spawned as a child
+  process (`subprocess.Popen`); its YAML config, including the
+  per-channel `paths`, is generated at startup from the live channel
+  list and written to a gitignored runtime path (it embeds DVR
+  credentials in RTSP source URLs — must never be committed).
+- **Network mode** (`MEDIAMTX_HOST` set, e.g. `mediamtx` in
+  production) — mediamtx runs as its own Swarm service instead of a
+  subprocess. `MediaBridge` doesn't spawn or configure it at all; it
+  waits for the already-running service to become reachable, then
+  pushes the per-channel `paths` onto it via mediamtx's own config
+  API. See "mediamtx as a separate Swarm service" below for why and
+  how.
+
+The four ports below are this bridge's own local listeners, not DVR
 config — defaults shown, overridable via `MEDIAMTX_HLS_PORT`/
 `MEDIAMTX_WEBRTC_PORT`/`MEDIAMTX_API_PORT`/`MEDIAMTX_RTSP_PORT` (see
 `.env.example`) in case one conflicts with something else on the host.
+`MEDIAMTX_HOST` itself defaults to `127.0.0.1`, matching self-managed
+mode; every network call in `mediabridge.py` (readiness check,
+control-API calls, the RTSP re-serve URLs `capture_clip`/
+`capture_frame` build) goes through this one host variable, so the two
+modes share almost all of the same code — only *how mediamtx gets
+started and configured* differs.
 
 - **Live channels**: one static mediamtx path per stream
   (`ch{id}_main`/`ch{id}_sub`), `sourceOnDemand: true` so the DVR isn't
@@ -175,6 +198,120 @@ transcode speed measured at **~1.0-1.05x real-time** on the dev
 machine (`veryfast` libx264 preset) — keeps up, but with little CPU
 headroom; revisit the preset/resolution if this box is resource
 constrained or multiple viewers watch channel 10 concurrently.
+
+### mediamtx as a separate Swarm service
+
+Production (Swarm) runs mediamtx as its own service, not a
+`subprocess.Popen` child of the FastAPI process — `dvr-window` and
+`mediamtx` are two separate services in `docker-compose.swarm.yml`,
+both on the `traefik-public` overlay network.
+
+**Why**: triggered by a real incident (2026-08-03, `sm-qohelet`/
+`sw-david01`) — mediamtx was OOM-killed inside the single shared
+container and sat as an unreaped zombie for ~15 hours, completely
+undetected. HLS/WebRTC/mediamtx's own control API all stopped
+accepting connections while `/healthz` kept returning `{"status":
+"ok"}` (it only ever proved the FastAPI process itself was alive) and
+Swarm kept reporting the task `1/1 Running` (PID 1 was FastAPI, which
+never exits just because its mediamtx sidecar did, so `restart_policy:
+condition: on-failure` never triggered). An OOM-killed *container*, by
+contrast, is something Swarm already detects and acts on — splitting
+gets automatic restart-on-crash from the platform for free instead of
+reimplementing subprocess supervision in Python.
+
+**Image**: the upstream `bluenviron/mediamtx:<version>-ffmpeg` tag
+directly, no custom-built image. The `-ffmpeg` variant (Alpine-based)
+turned out to be required regardless of any config-delivery question:
+mediamtx's own `runOnDemand` transcode (`_transcode_path` above) spawns
+`ffmpeg` *inside whichever container mediamtx itself runs in* — the
+default tag is `FROM scratch` with no `ffmpeg` at all, so the
+transcode would simply fail to run post-split. Confirmed directly
+(`docker run --rm --entrypoint sh bluenviron/mediamtx:1.19.2-ffmpeg -c
+'which ffmpeg'`): Alpine 3.24, `ffmpeg` at `/usr/bin/ffmpeg`, plus
+`/bin/sh`/`/bin/sed`/`/bin/cat` — which also happens to be exactly what
+the entrypoint below needs.
+
+**Config delivery**: `mediamtx/base.yml` (mediamtx's base config —
+RTSP/HLS/WebRTC addresses, `authMethod`, `authInternalUsers`; no
+`paths:`, those get pushed later via the API) and `mediamtx/
+entrypoint.sh` are mounted into the container via Swarm `configs:`
+entries, not baked into a custom image. The entrypoint substitutes
+`AUTH_KEY` from the `auth_key` Swarm secret into `base.yml`'s
+`__AUTH_KEY__` placeholders (sed, escaping `&`/the delimiter/backslash
+in case the key contains them) before exec'ing mediamtx against the
+substituted copy — Swarm secrets mount as files
+(`/run/secrets/auth_key`), and mediamtx has no `_FILE`-suffix env var
+convention to read one directly.
+
+A full YAML file, not `MTX_*` env vars, and this wasn't the original
+plan — reversed after testing the real binary (`mediamtx/mediamtx`,
+already present locally per `AGENTS.md` setup) with actual
+`MTX_AUTHINTERNALUSERS_*` overrides and reading back `/v3/config/
+global/get`, not just reasoned about:
+
+- Env-var overrides for `authInternalUsers` **merge onto mediamtx's
+  compiled-in default list, per index** — they don't start blank.
+  Setting `MTX_AUTHINTERNALUSERS_1_USER`/`_PASS`/
+  `_PERMISSIONS_0_ACTION` left that index's stock-default `ips:
+  [127.0.0.1/32, ::1/128]` restriction in place, unremovable — setting
+  `_IPS=""` doesn't clear the list, it crashes mediamtx (`unable to
+  parse IP/CIDR ''`). That directly blocked the one thing this split
+  needed: a `backend` user reachable from a different container's
+  overlay-network IP, not just loopback.
+- Indices beyond the default list's length are **silently dropped** —
+  a `backend` user at index 3 never appeared in the resolved config at
+  all. Testing this from `127.0.0.1` is also methodologically
+  unreliable on its own, since the untouched default index already
+  grants passwordless `api` access from loopback regardless of whether
+  a custom override actually took effect.
+
+A full config file doesn't have either problem: `authInternalUsers`
+set via a file **replaces** mediamtx's default list rather than
+merging (already relied on for the `viewer` entry even before the
+split — see "Auth" below), so an unrestricted-IP `backend` user is
+just a normal list entry.
+
+**Auth model** (full detail in "Auth" below): a third
+`authInternalUsers` entry, `backend` (api action, `AUTH_KEY` password,
+unrestricted by IP), was added alongside `viewer` — the previous
+loopback-IP exemption for the `api` action can't work once
+`add_playback_path`/`remove_playback_path`/the live-view path push
+originate from `dvr-window`'s own overlay-network IP rather than
+mediamtx's own loopback. The `any`/`publish` loopback exemption is
+unaffected: the transcode ffmpeg publishing back into mediamtx's RTSP
+re-serve is still spawned by mediamtx itself, same container, still
+genuinely loopback.
+
+**Path registration is idempotent**: `MediaBridge._add_path` (used by
+`add_playback_path` and, in network mode, by `start()`'s live-view
+path push) calls mediamtx's `POST /v3/config/paths/replace/{name}`,
+not `/add/{name}`. `add` 400s if the path already exists — which
+happens on every ordinary `dvr-window` restart that doesn't also
+restart `mediamtx` (a rolling redeploy of just that service, or a
+crash-restart under `restart_policy`), and crashed app startup every
+time until this was caught by actually restarting the split standalone
+against a real DVR. `replace` is a true upsert — 200 whether the path
+existed already or not.
+
+**Placement**: both services carry a `node.role == worker` placement
+constraint in `docker-compose.swarm.yml` — nothing was otherwise
+pinning either off the Swarm manager (`sm-qohelet`), which also runs
+the cluster's Raft consensus/control plane and shouldn't compete with
+application workloads for CPU/memory.
+
+**Verified in production** (2026-08-04): deployed via `docker stack
+deploy` to the real cluster (`sm-qohelet` manager, `sw-david01`/
+`daya-regia.invis` workers). Both services converged healthy —
+`mediamtx`'s new `HEALTHCHECK` (`nc -z` against the HLS/API ports; the
+image has no `curl`, and `wget` treats mediamtx's 404 on `/` as a
+failure even when mediamtx itself is fine) passing, `dvr-window`'s
+logs confirming network mode (no local mediamtx subprocess spawned).
+Real LAN traffic observed flowing through the split (an actual client
+reading the H.265→H.264-transcoded `ch10_main` HLS stream), and a
+browser check against the real domain showed all 6 channels reaching
+`live`, matching a standalone pre-deploy test against the real DVR
+(isolated Docker network, separate from the running production
+service) that caught the `add`-vs-`replace` bug above.
 
 ## Clip download design
 
@@ -490,20 +627,34 @@ open.
   `401`s otherwise. Everything else (`/`, `/playback`, `/static/*`,
   `/healthz`) stays open — no session/cookie/redirect machinery, just
   a header check on the endpoints that actually touch the DVR.
-- **mediamtx (`app/mediabridge.py`)**: `authInternalUsers` defines a
-  fixed `viewer` user whose password is `AUTH_KEY`, granted `read`
-  only, plus a second entry exempting `127.0.0.1`/`::1` for `api` and
-  `publish` (mediamtx's own internal processes — `add_playback_path`/
-  `remove_playback_path` via the control API, and the H.265 transcode
-  ffmpeg publishing back into the RTSP re-serve — never need real
-  credentials, but `read` deliberately isn't in that exemption since
-  that's exactly what remote LAN viewers need the `viewer` credential
-  for). `authInternalUsers` **replaces** mediamtx's default user list
-  rather than merging with it — dropping the loopback-exempt entry
-  breaks the control-API calls above with `401`s. `capture_clip`'s
-  ffmpeg (which *reads* from the RTSP re-serve to build a download
-  clip) isn't loopback-exempt for `read`, so it authenticates as
-  `viewer:{AUTH_KEY}` explicitly.
+- **mediamtx (`app/mediabridge.py`, or `mediamtx/base.yml` in
+  production — see "mediamtx as a separate Swarm service" above)**:
+  `authInternalUsers` defines three entries, identical in shape in
+  both self-managed and network mode so bare-metal/local-dev and
+  production behave the same way:
+  - `viewer` — password `AUTH_KEY`, `read` only, unrestricted by IP.
+    Real LAN browsers authenticate as this (`static/auth.js`).
+  - `backend` — password `AUTH_KEY`, `api` only, unrestricted by IP.
+    `add_playback_path`/`remove_playback_path` and (network mode only)
+    the live-view path push in `MediaBridge.start()` authenticate as
+    this. Unrestricted by IP because in network mode these calls
+    originate from a different container's overlay-network IP, not
+    loopback — an IP-based exemption the way self-managed mode used to
+    have can't work there.
+  - `any` — no password, `publish` only, restricted to
+    `127.0.0.1`/`::1`. The H.265 transcode ffmpeg
+    (`_transcode_path` above) publishing back into the RTSP re-serve —
+    always spawned by mediamtx itself, same container/process, so
+    still genuinely loopback in both modes.
+
+  `authInternalUsers` **replaces** mediamtx's default user list rather
+  than merging with it (confirmed directly against the binary — env-var
+  overrides merge onto the compiled-in defaults per-index instead, see
+  "mediamtx as a separate Swarm service" above) — dropping any of the
+  three above breaks the corresponding calls with `401`s.
+  `capture_clip`'s ffmpeg (which *reads* from the RTSP re-serve to
+  build a download clip) isn't covered by any of the three, so it
+  authenticates as `viewer:{AUTH_KEY}` explicitly.
 - **Frontend (`static/auth.js`)**: shared by both pages.
   `ensureAuthKey()` shows a small login overlay if no key is cached in
   `localStorage`, validating it immediately against `/api/device`
