@@ -340,6 +340,52 @@ function setupHlsPlayer(video, status, hlsUrl) {
     clearTimeout(lagRebuildTimer); lagRebuildTimer = null;
   }
 
+  // A second, different failure mode from the frozen-frame one above:
+  // currentTime can be genuinely *advancing* (so the watchdog above never
+  // fires) while playback is stuck well behind the live edge — confirmed
+  // for real via a screenshot showing "live" with the DVR's own on-screen
+  // timestamp ~26 minutes stale. Most likely trigger is tab backgrounding
+  // (Chrome throttles decode hard on hidden tabs; resuming just continues
+  // from wherever it stalled instead of catching up) but this check isn't
+  // backgrounding-specific — it catches any cause of sustained drift. See
+  // PLAN.md "Phase 12 design".
+  //
+  // Threshold generous for the same reason as LAG_STATUS_MS above: the
+  // multi-hop-wireless channels see real multi-second jitter under normal
+  // conditions, and lowLatencyMode's own target latency isn't zero either
+  // — 20s of drift is well past either of those, not a false-positive risk.
+  const DRIFT_THRESHOLD_S = 20;
+  const DRIFT_STATUS_MS = 10000;
+  const DRIFT_REBUILD_MS = 15000;
+  let driftSinceMs = null;
+
+  // Piggybacks on the existing `timeupdate` handler below rather than a
+  // separate polling interval — it already fires often enough on its own
+  // while the stream is healthy, matching this file's existing "costs
+  // nothing while healthy" reasoning for the frozen-frame watchdog.
+  function checkDrift() {
+    if (!hls || hls.liveSyncPosition == null || !Number.isFinite(hls.liveSyncPosition)) {
+      driftSinceMs = null;
+      return false;
+    }
+    const behindS = hls.liveSyncPosition - video.currentTime;
+    if (behindS < DRIFT_THRESHOLD_S) {
+      driftSinceMs = null;
+      return false;
+    }
+    if (driftSinceMs == null) driftSinceMs = Date.now();
+    return true;
+  }
+
+  // Snaps back to the live edge immediately on tab foreground instead of
+  // waiting on hls.js's own gradual low-latency catchup (confirmed this
+  // does eventually happen on its own, just not promptly — see PLAN.md).
+  function seekToLiveEdge() {
+    if (hls && hls.liveSyncPosition != null && Number.isFinite(hls.liveSyncPosition)) {
+      video.currentTime = hls.liveSyncPosition;
+    }
+  }
+
   function armLagWatchdog() {
     clearLagTimers();
     // Backgrounded tabs get their rendering/decoding throttled by the
@@ -358,6 +404,7 @@ function setupHlsPlayer(video, status, hlsUrl) {
 
   function start() {
     clearLagTimers();
+    driftSinceMs = null;
     if (Hls.isSupported()) {
       if (hls) hls.destroy();
       hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
@@ -417,12 +464,34 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // drops/duplicates frames under load (see ffmpeg's own `dup=`/
   // `drop=` counters in the run.sh log) without ever fully stalling.
   video.addEventListener('timeupdate', () => {
-    setStatus('live', 'ok');
+    // Frames advancing doesn't necessarily mean "live" — checkDrift()
+    // catches the case where they're advancing from well behind the live
+    // edge (see PLAN.md "Phase 12 design"). Still calling armLagWatchdog()
+    // either way: frames genuinely are moving, so the frozen-frame
+    // watchdog above should stay reset regardless of drift status.
     armLagWatchdog();
+    if (checkDrift()) {
+      const driftingForMs = Date.now() - driftSinceMs;
+      if (driftingForMs >= DRIFT_STATUS_MS + DRIFT_REBUILD_MS) {
+        if (hls) { hls.destroy(); hls = null; }
+        scheduleRestart();
+        return;
+      }
+      if (driftingForMs >= DRIFT_STATUS_MS) {
+        setStatus('lagging…', 'loading');
+        return;
+      }
+    }
+    setStatus('live', 'ok');
   });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') armLagWatchdog();
-    else clearLagTimers();
+    if (document.visibilityState === 'visible') {
+      seekToLiveEdge();
+      driftSinceMs = null;
+      armLagWatchdog();
+    } else {
+      clearLagTimers();
+    }
   });
 
   // The native-Safari fallback path has no hls.js to hook for
