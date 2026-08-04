@@ -29,6 +29,7 @@ Rationale in `ARCHITECTURE.md`.
 | 10 | ✅ done | Live view overlay UX: fullscreen button in the detail modal, auto-reconnect on HLS stream error, stream status (live/reconnecting/error) surfaced in the modal. Design below. |
 | 11 | ✅ done | Detect a *lagging* stream (still connected, no fatal hls.js error, but frames have stopped advancing) as a status distinct from live/reconnecting/error. Design below. |
 | 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
+| 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -311,6 +312,55 @@ simulating drift then a hidden→visible cycle (same
 own testing), `currentTime` jumped immediately back near the live edge
 instead of continuing to crawl from the drifted position. No console
 errors, other channels unaffected throughout.
+
+## Phase 13 design: per-camera network latency
+
+Requested as "ping in ms per camera." The DVR's own ISAPI has no such
+metric on this firmware — checked directly against the real device:
+`/ISAPI/ContentMgmt/InputProxy/channels/<id>/status` reports `online`/
+`chanDetectResult` but no latency field, and `/ISAPI/System/Network/
+ping`/`testNetworkDelay` both `404 Can't locate the url`. So this
+measures the *backend's* own network path to each camera instead of
+the DVR's — not identical if the DVR reaches a camera over a different
+hop than the backend does, but the closest available proxy.
+
+Only meaningful for IP-proxy channels (9/10 on this DVR) — analog
+channels connect over coax, no IP hop to measure at all. Generic to
+whatever a given DVR reports, not hardcoded to those two: `GET
+/api/ping` (`app/main.py`) filters `app.state.channels` for whichever
+ones have an `ipAddress` set, which `_build_ip_channel` populates from
+`sourceInputPortDescriptor` (only present for IP-proxy channels,
+already discovered dynamically per-DVR the same way channel names/
+resolutions are) and `_build_channel` (analog) never sets — pointing
+this at a different DVR with a different number of IP-proxy cameras at
+different IPs needs zero code changes.
+
+- **Metric**: plain TCP-connect time to each camera's own ONVIF manage
+  port (`managePortNo`, already returned by the DVR's own channel
+  list — 5000 on this deployment). Not raw ICMP: that needs
+  `CAP_NET_RAW` on the container, a real infra change touching every
+  deployment (Swarm, standalone Docker, bare-metal); a bare TCP socket
+  needs no elevated privileges anywhere and is close enough to ICMP RTT
+  on a LAN link. `_tcp_ping` (`app/main.py`) times a raw
+  `asyncio.open_connection`, `None` on timeout/refused rather than
+  raising — one unreachable camera shouldn't break the response for
+  the others, pinged concurrently via `asyncio.gather`.
+- **Frontend**: `pingLoop()` (`static/index.html`) polls `GET
+  /api/ping` every 5s, writes into a `.ping` span next to each cell's
+  status badge, keyed by `data-channel-id` (already set in `main()`
+  for click handling). Channels absent from the response (analog) just
+  keep an empty span — hidden entirely via a `.ping:empty` CSS rule
+  rather than needing an explicit "not applicable" state.
+
+Verified against the real DVR/cameras (bare-metal `run.sh`): `GET
+/api/ping` returned real, plausible values for both IP-proxy channels
+(e.g. `{"id": 9, "pingMs": 40.6}`, `{"id": 10, "pingMs": 39.1}` on one
+call; single-digit ms on another — consistent with real jitter already
+documented elsewhere for these same multi-hop-wireless channels) and
+correctly omitted all 4 analog channels. In the browser, both IP-proxy
+cells showed a live-updating `Xms` next to their status badge; all 4
+analog cells showed nothing. No console errors across multiple poll
+cycles.
 
 ## Non-goals (for now)
 
