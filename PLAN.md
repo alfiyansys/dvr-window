@@ -22,7 +22,7 @@ Rationale in `ARCHITECTURE.md`.
 | 3 | ✅ done | PTZ — channels 9/10 (IP-proxy cameras) got PTZ hardware; `/api/ptz/{channelId}/{continuous,stop}` + live-view D-pad. Analog channels 1-4 still have no PTZ hardware. |
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
 | 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
-| 6 | ⬜ next | Polish/packaging — systemd service, playback-path GC, event/alarm stream |
+| 6 | ⬜ next | Polish/packaging — systemd service, playback-path GC, event/alarm stream, mediamtx process supervision/health check (see design below, found via a real production incident; chosen fix is splitting mediamtx into its own Swarm service, not in-app supervision) |
 | 7 | ✅ done | Continuous playback across recording-segment boundaries — auto-advance into the next segment instead of freezing at the end of one; skip forward over a real recording gap instead of stopping. See `ARCHITECTURE.md` "Continuous playback across recording segments". |
 | 8 | ✅ done | Day timeline scrubber for playback — horizontal bar showing the loaded day's recorded segments/gaps, click-to-seek, reusing the existing playback-start/gap-clamp mechanism. See `ARCHITECTURE.md` "Day timeline scrubber". |
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
@@ -204,6 +204,199 @@ declaring it fatal. Previously that read as "live" indefinitely.
   reuses the exact `hls.destroy()`/`scheduleRestart()` path Phase 10
   already proved against real outages, so risk is low, but worth a
   real 25s+ dropout check the next time one happens naturally.
+
+## Phase 6 design: mediamtx process supervision & health check
+
+Triggered by a real production incident (Swarm deployment on
+`sm-qohelet`/`sw-david01`, 2026-08-04): `mediamtx` was OOM-killed
+inside the container at ~2026-08-03 16:05 UTC and sat as an unreaped
+zombie for ~15 hours, completely undetected. HLS (`:8888`), WebRTC
+(`:8889`), and mediamtx's own control API (`:9997`) all stopped
+accepting connections — live view was fully dead — while `/healthz`
+kept returning `{"status": "ok"}`, Docker Swarm kept reporting the
+task `1/1 Running`, and Traefik/the FastAPI app/`/api/*` all worked
+normally throughout. Confirmed root cause via `docker inspect`
+(`State.OOMKilled: true`) and `/proc/<mediamtx-pid>/status` showing
+`State: Z` inside the container. Only found by chance during an
+unrelated manual check, not by any alerting.
+
+Two independent gaps let this go unnoticed:
+
+- **No supervision of the mediamtx child process.** `MediaBridge.start()`
+  (`app/mediabridge.py`) does a single `subprocess.Popen(...)` at
+  startup and never checks on it again — no polling, no restart on
+  unexpected exit. Once mediamtx dies, nothing in the app notices or
+  reacts.
+- **`/healthz` doesn't reflect mediamtx at all.** It's a static
+  `{"status": "ok"}` (`app/main.py`) that only proves the FastAPI
+  process itself is alive. Swarm's `restart_policy: condition:
+  on-failure` (`docker-compose.swarm.yml`) can only fire on a
+  container-level exit — but PID 1 (FastAPI) never exits just because
+  its mediamtx sidecar did, so the restart policy never triggers.
+
+Likely OOM trigger: the container's memory limit is `384M`
+(`docker-compose.swarm.yml`, reservation `128M`) — tight for mediamtx
+plus concurrent per-channel `ffmpeg` H.265→H.264 transcodes
+(`_transcode_path` in `mediabridge.py`) under real load with multiple
+channels active at once. Not confirmed with actual peak-usage
+measurements, just the closest match to what's known.
+
+Fix, in priority order:
+
+1. **Make `/healthz` (or a separate check) reflect mediamtx's real
+   state** — check `self._proc.poll() is None`, and/or hit mediamtx's
+   own API on `127.0.0.1:{API_PORT}`. Wire a Docker `HEALTHCHECK`
+   (currently none in `Dockerfile`) to it so Swarm can actually detect
+   this and restart the task automatically instead of serving a dead
+   stream indefinitely.
+2. ~~**Supervise the mediamtx subprocess from inside the app**~~ —
+   superseded by the container split below, which gets this from Swarm
+   for free instead of reinventing it in Python. (Original idea: a
+   background watcher (thread or asyncio task) that notices
+   `Popen.poll()` return non-`None` unexpectedly and either restarts
+   mediamtx in place or exits the app process so Swarm's
+   `restart_policy` takes over.)
+3. **Re-check the `384M` memory limit** against actual peak usage with
+   all configured channels' transcodes running concurrently, and size
+   it with real headroom instead of the current guess.
+4. **Surface the failure** — at minimum a log line when mediamtx exits
+   unexpectedly; this incident took a multi-node SSH investigation
+   (checking Swarm task state, Traefik, port listeners on 3 different
+   hosts, then `/proc/<pid>/status` inside the container) to even
+   confirm what was wrong, entirely because nothing surfaced it up
+   front.
+
+### Chosen fix: split mediamtx into its own Swarm service
+
+Considered as an alternative to fix item 2 above (in-app subprocess
+watcher) and chosen over it: put `mediamtx` in its own
+container/Swarm service instead of a `subprocess.Popen` child of the
+FastAPI process. An OOM-killed *container* is something Swarm already
+detects and acts on — `restart_policy: condition: on-failure`
+(`docker-compose.swarm.yml`) fires on container exit, no new
+supervision code needed. That's strictly closer to the actual gap
+this incident exposed than teaching the FastAPI app to poll
+`Popen.poll()` itself: right now nothing *containerized* dies when
+mediamtx does, so Swarm has nothing to react to. Splitting fixes that
+at the platform level instead of re-implementing it in Python. Item 2
+above is superseded by this; items 1 (mediamtx-aware `/healthz`/
+`HEALTHCHECK`), 3 (memory-limit re-check), and 4 (log the failure)
+still apply, just aimed at the new `mediamtx` service's own container
+instead of a subprocess.
+
+Two services, `dvr-window` (FastAPI) and `mediamtx`, both on the
+`traefik-public` overlay network so FastAPI can reach mediamtx's
+control API (`app/mediabridge.py`) by service DNS name instead of
+`127.0.0.1`. mediamtx's HLS/WebRTC ports (8888/8889) keep being
+published directly — browsers hit them straight, not through
+Traefik/FastAPI — so that half of `docker-compose.swarm.yml` barely
+changes, it's really just which container those `ports:` entries
+belong to. Only the per-channel `ffmpeg` transcode processes stay
+attached to mediamtx (it spawns them itself via `runOnDemand`, same
+container) — this is a two-way split, not three; `capture_clip`/
+`capture_frame`'s `ffmpeg` calls stay short-lived subprocesses of
+FastAPI either way, no container needed for those.
+
+What has to change:
+
+- **Startup**: `MediaBridge.start()` currently writes `runtime.yml`
+  and does one `subprocess.Popen([mediamtx_bin, config_path])` —
+  mediamtx can't be started this way once it's a separately-deployed
+  container. mediamtx's own base config (RTSP/HLS/WebRTC addresses,
+  `authInternalUsers` built from `AUTH_KEY`) moves into that
+  container's own entrypoint, rendered from env/secret at its boot,
+  independent of FastAPI. The per-channel `paths` FastAPI currently
+  bakes into that same startup config file instead get pushed after
+  the fact via mediamtx's own config API — the same pattern
+  `add_playback_path`/`remove_playback_path` already use for playback
+  paths, just applied to the live-view paths too instead of being
+  config-file-only.
+- **Readiness**: `_wait_until_ready()` polls `127.0.0.1:8888` —
+  becomes polling the `mediamtx` service's DNS name over the overlay
+  network, tolerant of mediamtx not being up yet on a cold stack
+  deploy (Swarm doesn't guarantee inter-service start order within one
+  `docker stack deploy`).
+- **Auth model**: the `authInternalUsers` loopback exemption
+  (`ips: ["127.0.0.1", "::1"]`, granting passwordless `api`+`publish`)
+  stops being valid for the `api` action once `add_playback_path`/
+  `remove_playback_path` calls originate from the `dvr-window`
+  container's overlay-network IP instead of mediamtx's own loopback —
+  container IPs on an overlay network aren't loopback-trusted the way
+  same-namespace `127.0.0.1` is. Needs a real credentialed internal
+  user (distinct from the LAN-facing `viewer` user, which stays
+  `read`-only) for control-API calls. The `publish` half of that
+  exemption is unaffected — the transcode `ffmpeg` publishing back
+  into mediamtx's RTSP re-serve is still spawned by mediamtx itself,
+  same container, still genuinely loopback. `capture_clip`/
+  `capture_frame` already authenticate as `viewer` for RTSP `read`
+  (never relied on the loopback exemption to begin with, per the
+  existing comment in `mediabridge.py`) — unaffected by the split
+  either way.
+- **Memory limits**: today's single `384M` limit
+  (`docker-compose.swarm.yml`) covers both processes conflated
+  together — exactly why fix item 3 above couldn't previously be sized
+  from real data. Splitting gives each container its own
+  limit/reservation, and `docker stats`/Swarm now reports each
+  independently, giving fix item 3 the real per-process peak-usage
+  numbers it was missing.
+- **mediamtx's own `HEALTHCHECK`**: fix item 1 above still applies,
+  now scoped to the `mediamtx` container's own image (hit its `:9997`
+  API or `:8888` HLS root) rather than folded into `/healthz` on the
+  FastAPI side.
+
+**Decided (revised after testing against the real binary — see below):**
+no custom wrapper `Dockerfile`, but not pure env-var config either.
+Use the upstream `bluenviron/mediamtx:<version>-ffmpeg` image directly,
+with mediamtx's *base* config (RTSP/HLS/WebRTC addresses, `authMethod`,
+`authInternalUsers`) delivered as a real YAML file mounted via a Swarm
+`configs:` entry, plus a small `entrypoint.sh` (also delivered via
+`configs:`, not baked into an image) that substitutes `AUTH_KEY` from
+the Swarm secret into that file before exec'ing mediamtx. Per-channel
+`paths` are still not part of this file — those get added after boot
+via mediamtx's own config API, per the Startup bullet above.
+
+The `-ffmpeg` tag (Alpine-based, not the default `FROM scratch` tag)
+turned out to be required anyway, independent of the config question:
+mediamtx's own `runOnDemand` transcode (`_transcode_path` in
+`app/mediabridge.py`) spawns `ffmpeg` *inside whichever container
+mediamtx itself runs in* — the default scratch-based image has no
+`ffmpeg` at all, so the transcode would simply fail to run post-split.
+Confirmed directly (`docker run --rm --entrypoint sh
+bluenviron/mediamtx:1.19.2-ffmpeg -c 'which ffmpeg'`): Alpine 3.24,
+`ffmpeg` at `/usr/bin/ffmpeg`, plus `/bin/sh`/`/bin/sed`/`/bin/cat` —
+which also happens to be exactly what `entrypoint.sh` needs to do the
+secret substitution. One image solves both problems.
+
+Two things reversed the original pure-env-var plan, both confirmed by
+actually running `mediamtx/mediamtx` (the binary already present
+locally per `AGENTS.md` setup) with real `MTX_AUTHINTERNALUSERS_*` env
+vars and reading back `/v3/config/global/get`, not just reasoned about:
+
+- **Env-var overrides merge onto mediamtx's *compiled-in default*
+  `authInternalUsers` list, per index — they don't start from blank.**
+  Setting `MTX_AUTHINTERNALUSERS_1_USER`/`_PASS`/`_PERMISSIONS_0_ACTION`
+  left that index's stock-default `ips: [127.0.0.1/32, ::1/128]`
+  restriction in place untouched in the resolved config. There's no way
+  to clear it either — explicitly setting `_IPS=""` doesn't blank the
+  list, it crashes mediamtx outright (`unable to parse IP/CIDR ''`).
+  This directly blocks the one thing this split actually needs: a
+  `backend`/`api` user reachable from the `dvr-window` container's
+  overlay-network IP, not just loopback.
+- **Indices beyond the default list's length are silently dropped.**
+  Setting index 3 (`backend`, past the 3 stock entries) never appeared
+  in `/v3/config/global/get` at all. Testing this from `127.0.0.1` is
+  also methodologically unreliable on its own — the untouched default
+  index 1 already grants passwordless `api` access from loopback, so a
+  successful loopback-authenticated request doesn't prove a custom
+  override actually took effect; it might just be the default entry
+  letting it through regardless.
+
+A full YAML file doesn't have either problem — full-file
+`authInternalUsers` **replaces** mediamtx's default list rather than
+merging (already relied on today, undisturbed, for the single-container
+deployment's own `viewer` entry — see the existing comment in
+`app/mediabridge.py`), so an unrestricted-IP `backend` user is just a
+normal list entry, no index-merge surprises.
 
 ## Non-goals (for now)
 
