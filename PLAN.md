@@ -28,7 +28,7 @@ Rationale in `ARCHITECTURE.md`.
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
 | 10 | ✅ done | Live view overlay UX: fullscreen button in the detail modal, auto-reconnect on HLS stream error, stream status (live/reconnecting/error) surfaced in the modal. Design below. |
 | 11 | ✅ done | Detect a *lagging* stream (still connected, no fatal hls.js error, but frames have stopped advancing) as a status distinct from live/reconnecting/error. Design below. |
-| 12 | ⬜ next | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only catches *frozen* frames, not this. Design below. |
+| 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -280,27 +280,37 @@ needless churn for something that already self-heals given time — the
 fix should just make the snap-back happen immediately instead of
 waiting on it.
 
-**Fix, two parts** (not yet implemented):
+**Fixed, two parts**, both in `setupHlsPlayer` (`static/index.html`):
 
-1. On `visibilitychange` returning to visible, seek to
-   `hls.liveSyncPosition` (confirmed present in the vendored hls.js
-   1.5.17 build, `static/vendor/hls.min.js`) instead of only re-arming
-   the watchdog — snaps playback back to the live edge immediately on
-   tab foreground rather than waiting for hls.js's own gradual catchup
-   or for someone to notice a stale picture.
-2. An ongoing drift check as defense-in-depth for causes other than
-   backgrounding (e.g. a real network slowdown that lets the buffer
-   grow without hls.js's fatal-error logic ever tripping): compare
-   `hls.liveSyncPosition - video.currentTime` against a threshold; if
-   too large for too long, treat as `lagging` even though frames are
-   technically still advancing, escalating through the same
-   lag-watchdog path Phase 11 already has rather than inventing a
-   third mechanism.
+1. `seekToLiveEdge()` — on `visibilitychange` returning to visible,
+   seeks to `hls.liveSyncPosition` (confirmed present in the vendored
+   hls.js 1.5.17 build, `static/vendor/hls.min.js`) instead of only
+   re-arming the watchdog — snaps playback back to the live edge
+   immediately on tab foreground rather than waiting for hls.js's own
+   gradual catchup or for someone to notice a stale picture.
+2. `checkDrift()` — an ongoing drift check as defense-in-depth for
+   causes other than backgrounding, piggybacking on the existing
+   `timeupdate` handler rather than a separate polling interval
+   (matching Phase 11's own "costs nothing while healthy" reasoning):
+   compares `hls.liveSyncPosition - video.currentTime` against a 20s
+   threshold on every `timeupdate`; sustained past that, escalates
+   through `lagging…` then a full rebuild via the same
+   destroy-and-reconnect path Phase 10 already has, rather than a
+   third recovery mechanism.
 
-Not yet decided: the exact drift threshold for part 2, and how often
-to check it (piggybacking on the existing `timeupdate` handler is the
-obvious first choice over a separate polling interval, matching Phase
-11's own "costs nothing while healthy" reasoning).
+Verified against a real live stream from the real DVR (bare-metal
+`run.sh`, alternate ports to not collide with the production Swarm
+deployment already on this host): manually rewound a live cell's
+`video.currentTime` by 25s via the browser console to simulate drift —
+status correctly held `lagging…` while `currentTime` kept advancing
+normally the whole time (not frozen), then escalated to a full rebuild
+and recovered to `live` with a fresh low `currentTime`, fully
+automatically. Separately confirmed the visibility-return snap: after
+simulating drift then a hidden→visible cycle (same
+`document.visibilityState` override trick already used for Phase 11's
+own testing), `currentTime` jumped immediately back near the live edge
+instead of continuing to crawl from the drifted position. No console
+errors, other channels unaffected throughout.
 
 ## Non-goals (for now)
 
