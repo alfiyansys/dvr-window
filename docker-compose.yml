@@ -1,0 +1,119 @@
+# Standalone variant of docker-compose.swarm.yml, for `docker compose up`
+# on a single machine with no Swarm cluster (bare-metal alternative: run.sh).
+# Kept as a *separate* file rather than trying to make one file serve both
+# — the two setups diverge in real ways, not just cosmetically:
+#
+# - `secrets:`/`configs:` use `file:` sources here instead of the swarm
+#   file's `external: true` — external secrets specifically mean "look up
+#   an object already created via `docker secret create`", which requires
+#   swarm mode active on the daemon; plain `docker compose up` has no
+#   secret store of its own; needs a local file instead. Verified this
+#   Compose version (v2.17.3) mounts a `file:`-sourced secret at
+#   `/run/secrets/<name>` identically either way — no code changes needed
+#   on either side (docker-entrypoint.sh/mediamtx/entrypoint.sh don't care
+#   how the file got there).
+# - `dvr-window` builds from source (`build:`) instead of pulling
+#   `registry.gitlab.com/alfiyansys/dvr-window` — that registry is
+#   private, no reason to require access to it just to run this locally.
+# - `deploy.replicas`/`restart_policy`/`placement`/`labels` are Swarm/
+#   stack-only — dropped here in favor of their plain-Compose
+#   equivalents (top-level `restart:`) or dropped entirely where there's
+#   no equivalent (placement constraints, Traefik routing labels — no
+#   cluster/Traefik to place across or route through). `deploy.resources`
+#   is kept: confirmed this Compose version applies cpu/memory limits
+#   even outside swarm.
+# - `dvr-window` publishes `8896` directly instead of relying on Traefik
+#   (there's no Traefik in a standalone setup) — same port `run.sh`/the
+#   bare-metal path already uses.
+#
+# Setup: copy `.env.example` to `.env` (HIKVISION_HOST/HIKVISION_USERNAME
+# read from there), then create `secrets/hikvision_password` and
+# `secrets/auth_key` (plain text, no trailing newline needed either way) —
+# see `secrets/*.example` for the expected filenames. Both are gitignored.
+#
+# Run: `docker compose up -d`. Live view: http://localhost:8896/
+
+services:
+  dvr-window:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - HIKVISION_HOST=${HIKVISION_HOST}
+      - HIKVISION_USERNAME=${HIKVISION_USERNAME}
+      # Same role as in docker-compose.swarm.yml - switches
+      # app/mediabridge.py into network mode instead of self-managing a
+      # local mediamtx subprocess. Works identically here: Compose's own
+      # default network already does the same service-name DNS
+      # resolution as a Swarm overlay network does.
+      - MEDIAMTX_HOST=mediamtx
+    secrets:
+      - hikvision_password
+      - auth_key
+    ports:
+      - "8896:8896"
+    networks:
+      - dvr-window
+    depends_on:
+      - mediamtx
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 64M
+
+  mediamtx:
+    # Same image/entrypoint/config-delivery approach as
+    # docker-compose.swarm.yml - see ARCHITECTURE.md "mediamtx as a
+    # separate Swarm service" for why (the -ffmpeg tag, config-via-file
+    # instead of env vars, the entrypoint secret substitution). None of
+    # that is swarm-specific, it all carries over unchanged.
+    image: bluenviron/mediamtx:1.19.3-ffmpeg
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    configs:
+      - source: mediamtx_base_config
+        target: /config/mediamtx.yml
+      - source: mediamtx_entrypoint
+        target: /entrypoint.sh
+        mode: 0555
+    secrets:
+      - auth_key
+    ports:
+      - "8888:8888"
+      - "8889:8889"
+    networks:
+      - dvr-window
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8888 && nc -z 127.0.0.1 9997"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 384M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+
+networks:
+  dvr-window:
+
+secrets:
+  hikvision_password:
+    file: ./secrets/hikvision_password
+  auth_key:
+    file: ./secrets/auth_key
+
+configs:
+  mediamtx_base_config:
+    file: ./mediamtx/base.yml
+  mediamtx_entrypoint:
+    file: ./mediamtx/entrypoint.sh

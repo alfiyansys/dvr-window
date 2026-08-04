@@ -83,6 +83,22 @@ away. Equivalent to:
 - Live view: `http://127.0.0.1:8896/`
 - Playback: `http://127.0.0.1:8896/playback`
 
+### Standalone Docker (no Swarm)
+
+`docker-compose.yml` runs the same two-service split production uses
+(`dvr-window` + `mediamtx`, see `ARCHITECTURE.md` "mediamtx as a
+separate Swarm service") on a single machine via plain `docker compose
+up` — no Swarm cluster needed. Setup: `.env` (as above) for
+`HIKVISION_HOST`/`HIKVISION_USERNAME`, plus `secrets/hikvision_password`
+and `secrets/auth_key` (plain text — see `secrets/*.example`, both
+gitignored). Then:
+
+```bash
+docker compose up -d
+```
+
+Live view: `http://localhost:8896/`.
+
 ## Configuration
 
 All configuration lives in `.env` (see `.env.example`) — never

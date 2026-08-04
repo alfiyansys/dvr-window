@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 *.secrets.*
+secrets/*
+!secrets/*.example
 __pycache__/
 *.pyc
 .venv/
