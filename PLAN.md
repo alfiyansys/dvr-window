@@ -28,6 +28,7 @@ Rationale in `ARCHITECTURE.md`.
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
 | 10 | ✅ done | Live view overlay UX: fullscreen button in the detail modal, auto-reconnect on HLS stream error, stream status (live/reconnecting/error) surfaced in the modal. Design below. |
 | 11 | ✅ done | Detect a *lagging* stream (still connected, no fatal hls.js error, but frames have stopped advancing) as a status distinct from live/reconnecting/error. Design below. |
+| 12 | ⬜ next | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only catches *frozen* frames, not this. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -239,6 +240,68 @@ guess was for both processes conflated together; splitting at least
 makes this measurable per-service now) and surfacing a log line if
 mediamtx ever exits unexpectedly.
 
+## Phase 12 design: fix silent live-view drift (advancing but stale)
+
+Found from a real screenshot (2026-08-04 17:13 desktop time): the
+"Car Port" channel's overlay showed status `live` (green) while the
+DVR's own burned-in on-screen timestamp read `16:47:21` — about 26
+minutes behind the desktop's system clock (`17:13:47`) at the moment
+of the screenshot. Not a frozen frame — `video.currentTime` was
+genuinely still advancing, just from a position stuck well behind the
+actual live edge.
+
+**Why Phase 11's watchdog doesn't catch this**: it only tracks whether
+`video.currentTime` is *advancing* via `timeupdate`
+(`armLagWatchdog`/`clearLagTimers` in `static/index.html`) — not
+whether the content itself is close to real time. Steady `timeupdate`
+events reassert `live` (`static/index.html:419-421`, deliberately
+added in Phase 11 so a merely-stuttering stream doesn't get stuck
+showing "lagging…" forever) even when what's advancing is a large
+backlog permanently behind the live edge. Phase 11 solved "frozen
+frames masquerading as live"; this is a different failure mode it was
+never designed to catch — "steadily advancing frames masquerading as
+live."
+
+**Most likely trigger**: tab backgrounding. Chrome throttles decode/
+rendering hard on hidden tabs; on `visibilitychange` back to visible
+(`static/index.html:423-424`), the code only re-arms the lag
+watchdog — it never seeks the video forward, so playback just resumes
+crawling forward from wherever it stalled, stuck behind by however
+much piled up while the tab was hidden.
+
+**Confirmed (user report): it does eventually self-correct** if the
+tab is left active for a while, without a full rebuild — consistent
+with hls.js's own internal low-latency live-sync catchup logic
+(`lowLatencyMode: true`, already set in `start()`) eventually kicking
+in on its own. This matters for the fix: the drift is real but not
+permanently stuck the way a genuinely dead stream is, so escalating
+straight to a full destroy-and-rebuild (Phase 10's mechanism) would be
+needless churn for something that already self-heals given time — the
+fix should just make the snap-back happen immediately instead of
+waiting on it.
+
+**Fix, two parts** (not yet implemented):
+
+1. On `visibilitychange` returning to visible, seek to
+   `hls.liveSyncPosition` (confirmed present in the vendored hls.js
+   1.5.17 build, `static/vendor/hls.min.js`) instead of only re-arming
+   the watchdog — snaps playback back to the live edge immediately on
+   tab foreground rather than waiting for hls.js's own gradual catchup
+   or for someone to notice a stale picture.
+2. An ongoing drift check as defense-in-depth for causes other than
+   backgrounding (e.g. a real network slowdown that lets the buffer
+   grow without hls.js's fatal-error logic ever tripping): compare
+   `hls.liveSyncPosition - video.currentTime` against a threshold; if
+   too large for too long, treat as `lagging` even though frames are
+   technically still advancing, escalating through the same
+   lag-watchdog path Phase 11 already has rather than inventing a
+   third mechanism.
+
+Not yet decided: the exact drift threshold for part 2, and how often
+to check it (piggybacking on the existing `timeupdate` handler is the
+obvious first choice over a separate polling interval, matching Phase
+11's own "costs nothing while healthy" reasoning).
+
 ## Non-goals (for now)
 
 - Two-way audio talk-back.
@@ -248,6 +311,8 @@ mediamtx ever exits unexpectedly.
 
 ## Next step
 
-Phase 6 — packaging: systemd service + install script, playback-path
-garbage collection (see `ARCHITECTURE.md` known gaps), event/alarm
-stream, basic auth on the local UI.
+Phase 12 — fix the silent live-view drift bug (design above), since
+it's a currently-visible correctness issue on a real deployment.
+Remaining Phase 6 items after that: systemd service + install script,
+playback-path garbage collection (see `ARCHITECTURE.md` known gaps),
+event/alarm stream, memory-limit re-check.
