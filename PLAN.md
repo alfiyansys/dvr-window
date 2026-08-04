@@ -133,6 +133,17 @@ next to the channel name, via a `MutationObserver` on the cell's
 `.status` span rather than threading channel state through
 `setupHlsPlayer`, which has no notion of the overlay.
 
+**Prev/Next layout (cosmetic-only)**: `overlayPrev`/`overlayNext` are
+wrapped in their own `.actions-pager` div inside `.actions`
+(`static/index.html`), with `display: flex; flex-direction: row`
+outside the `min-width: 700px` media query so it always wins over the
+sidebar's `.actions { flex-direction: column }` stacking — the two
+buttons render as one row of compact `◂`/`▸` arrows instead of two
+full-width stacked rows on desktop, with `aria-label`s replacing the
+now-dropped "Prev"/"Next" text. Snapshot/Playback/Fullscreen/Close are
+unaffected (still stack on desktop, flow normally on mobile). No
+behavior change — button IDs and click handlers untouched.
+
 ## Phase 11 design: lagging-stream detection
 
 A stream can be "connected" with no fatal hls.js error yet still

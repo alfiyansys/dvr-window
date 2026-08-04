@@ -30,6 +30,11 @@
   .overlay-box .label { padding: 8px 12px; font-size: 14px; color: #ddd; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .overlay-title { display: inline-flex; align-items: center; gap: 8px; }
   .overlay-box .label .actions { display: flex; gap: 8px; }
+  /* Prev/Next stay on one row as compact arrow buttons even when the
+     parent .actions list is stacked into a column on desktop (see the
+     min-width: 700px override below) — this rule is outside that media
+     query so it applies unconditionally at every viewport width. */
+  .overlay-box .label .actions-pager { display: flex; flex-direction: row; gap: 8px; }
   .overlay-box button { cursor: pointer; color: #aaa; font-size: 14px; background: #1c1c1c; border: 1px solid #333; border-radius: 4px; padding: 4px 10px; }
   .overlay-box button:hover { background: #2a2a2a; color: #eee; }
 
@@ -90,8 +95,10 @@
         <div class="actions">
           <button id="overlaySnapshot">Snapshot 📷</button>
           <button id="overlayPlayback">Playback ▶</button>
-          <button id="overlayPrev">◂ Prev</button>
-          <button id="overlayNext">Next ▸</button>
+          <div class="actions-pager">
+            <button id="overlayPrev" aria-label="Previous channel">◂</button>
+            <button id="overlayNext" aria-label="Next channel">▸</button>
+          </div>
           <button id="overlayFullscreen">Fullscreen ⛶</button>
           <button id="overlayClose">Close ✕</button>
         </div>
