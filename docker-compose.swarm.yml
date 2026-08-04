@@ -38,6 +38,12 @@ services:
         - traefik.http.services.dvr-window.loadbalancer.server.port=8896
       restart_policy:
         condition: on-failure
+      # Keep app workloads off the manager (sm-qohelet) - it's already
+      # running the Raft consensus/control plane for the whole cluster,
+      # no reason to also compete with it for CPU/memory.
+      placement:
+        constraints:
+          - node.role == worker
 
   mediamtx:
     # -ffmpeg tag (Alpine-based), not the default `FROM scratch` tag -
@@ -85,6 +91,9 @@ services:
           memory: 128M
       restart_policy:
         condition: on-failure
+      placement:
+        constraints:
+          - node.role == worker
 
 networks:
   traefik-public:
