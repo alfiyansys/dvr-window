@@ -1,0 +1,68 @@
+# Base config for the mediamtx Swarm service (see PLAN.md "Chosen fix:
+# split mediamtx into its own Swarm service"). Mounted read-only via a
+# Swarm `configs:` entry at /config/mediamtx.yml; entrypoint.sh copies
+# it out, substitutes __AUTH_KEY__ from the auth_key Swarm secret, and
+# execs mediamtx against the substituted copy.
+#
+# No `paths:` here — per-channel live-view paths are pushed after boot
+# via mediamtx's own config API by app/mediabridge.py (MediaBridge.start
+# in network mode), the same pattern add_playback_path/remove_playback_path
+# already use for playback paths.
+logLevel: info
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+rtmp: no
+srt: no
+moq: no
+
+api: yes
+apiAddress: :9997
+
+# Bind on all interfaces, unlike the old single-container config which
+# bound these to 127.0.0.1 - dvr-window now reaches these over the
+# Swarm overlay network by service name (mediamtx:9997/:8554), not
+# loopback. Not published externally via `ports:` in
+# docker-compose.swarm.yml, so still unreachable from the LAN/host,
+# same security boundary as before, just enforced at the network layer
+# instead of the bind address.
+hlsAddress: :8888
+webrtcAddress: :8889
+
+# authInternalUsers here REPLACES mediamtx's own compiled-in default
+# list entirely (confirmed - see PLAN.md; this is the behavior for a
+# full config file, unlike env-var overrides which merge onto the
+# defaults per-index and can't clear their baked-in IP restrictions).
+authMethod: internal
+authInternalUsers:
+  # LAN-facing viewer, HLS/WebRTC read only - real browsers authenticate
+  # as this user (see static/auth.js).
+  - user: viewer
+    pass: __AUTH_KEY__
+    ips: []
+    permissions:
+      - action: read
+        path: ""
+  # dvr-window's own control-API calls (add_playback_path/
+  # remove_playback_path, and pushing the live-view paths below at
+  # boot) - reachable from dvr-window's overlay-network IP, not just
+  # loopback, since it's a separate container now.
+  - user: backend
+    pass: __AUTH_KEY__
+    ips: []
+    permissions:
+      - action: api
+        path: ""
+  # The H.265->H.264 transcode ffmpeg mediamtx spawns itself via
+  # runOnDemand (_transcode_path in app/mediabridge.py) publishes back
+  # into this same RTSP server from within this same container - still
+  # genuinely loopback, still passwordless.
+  - user: any
+    pass: ""
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: publish
+        path: ""
+
+paths: {}
