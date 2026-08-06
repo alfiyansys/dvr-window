@@ -94,14 +94,16 @@ services:
       start_period: 15s
       retries: 3
     restart: unless-stopped
+    # See docker-compose.swarm.yml for the reasoning - same real-load
+    # measurement applies to both, limits kept identical as always.
     deploy:
       resources:
         limits:
-          cpus: "1.0"
-          memory: 384M
+          cpus: "1.5"
+          memory: 768M
         reservations:
-          cpus: "0.1"
-          memory: 128M
+          cpus: "0.2"
+          memory: 256M
 
 networks:
   dvr-window:
