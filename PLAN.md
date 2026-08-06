@@ -22,7 +22,7 @@ Rationale in `ARCHITECTURE.md`.
 | 3 | ✅ done | PTZ — channels 9/10 (IP-proxy cameras) got PTZ hardware; `/api/ptz/{channelId}/{continuous,stop}` + live-view D-pad. Analog channels 1-4 still have no PTZ hardware. |
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
 | 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
-| 6 | ⬜ next | Polish/packaging — systemd service, playback-path GC, event/alarm stream. mediamtx process supervision/health check (see design below, found via a real production incident) is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Remaining Phase 6 items (systemd, playback-path GC, event/alarm stream, memory-limit re-check) still open. |
+| 6 | ⬜ next | Polish — playback-path GC, event/alarm stream. mediamtx process supervision/health check (see design below, found via a real production incident) is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Remaining Phase 6 items (playback-path GC, event/alarm stream, memory-limit re-check) still open. Packaging itself is done and Docker-only by decision — see `ARCHITECTURE.md`. |
 | 7 | ✅ done | Continuous playback across recording-segment boundaries — auto-advance into the next segment instead of freezing at the end of one; skip forward over a real recording gap instead of stopping. See `ARCHITECTURE.md` "Continuous playback across recording segments". |
 | 8 | ✅ done | Day timeline scrubber for playback — horizontal bar showing the loaded day's recorded segments/gaps, click-to-seek, reusing the existing playback-start/gap-clamp mechanism. See `ARCHITECTURE.md` "Day timeline scrubber". |
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
@@ -379,11 +379,15 @@ cycles.
 - Multi-DVR / multi-site management (single DVR target for v1).
 - Mobile app — web UI only, works fine from a phone browser on LAN.
 - Exact UI/UX parity with Hikvision's own web interface — functional parity, not a visual clone.
+- Bare-metal packaging (systemd unit, install script). Docker is the
+  only supported deployment path — it's already built, working, and
+  running in production (`docker-compose.yml` standalone,
+  `docker-compose.swarm.yml` for the mediamtx-split Swarm setup).
 
 ## Next step
 
-Phase 12 — fix the silent live-view drift bug (design above), since
-it's a currently-visible correctness issue on a real deployment.
-Remaining Phase 6 items after that: systemd service + install script,
+Phases 12 and 13 are done. Remaining work is the rest of Phase 6:
 playback-path garbage collection (see `ARCHITECTURE.md` known gaps),
-event/alarm stream, memory-limit re-check.
+event/alarm stream, and a memory-limit re-check now that mediamtx runs
+as its own Swarm service (splitting made per-service usage measurable
+for the first time).

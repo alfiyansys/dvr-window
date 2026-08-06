@@ -62,7 +62,11 @@ of writing our own RTSP-to-browser transcoder.
   (live grid), `playback.html` (search + play recordings). hls.js
   vendored locally (no CDN dependency, keeps the local service
   self-contained).
-- **Packaging** (not built yet): systemd service, install script.
+- **Packaging**: Docker only, by decision — `Dockerfile` +
+  `docker-compose.yml` (standalone) / `docker-compose.swarm.yml`
+  (mediamtx split into its own Swarm service, see "mediamtx as a
+  separate Swarm service"), already deployed to production. No
+  bare-metal systemd unit / install script planned.
 
 ## ISAPI reference
 
