@@ -103,6 +103,8 @@ class MediaBridge:
     def __init__(self):
         self._proc: subprocess.Popen | None = None
         self.stream_names: list[str] = []
+        # name -> monotonic last-active timestamp, for gc_playback_paths.
+        self._playback_paths: dict[str, float] = {}
 
     def start(self, device: DeviceConfig, channels: list[dict]) -> None:
         paths = _build_paths(device, channels)
@@ -249,6 +251,7 @@ class MediaBridge:
 
     def add_playback_path(self, name: str, source_url: str) -> None:
         self._add_path(name, {"source": source_url, "sourceOnDemand": True})
+        self._playback_paths[name] = time.monotonic()
 
     def remove_playback_path(self, name: str) -> None:
         httpx.delete(
@@ -256,6 +259,49 @@ class MediaBridge:
             auth=(MEDIAMTX_BACKEND_USER, AUTH_KEY),
             timeout=5.0,
         )
+        self._playback_paths.pop(name, None)
+
+    def gc_playback_paths(self, idle_ttl: float = 60.0) -> list[str]:
+        """Delete playback/download paths nobody has read in idle_ttl seconds —
+        covers a client abandoning playback without calling
+        /api/playback/stop (closed tab, dead network), which would otherwise
+        leak the mediamtx path forever. Only ever touches paths this backend
+        itself registered via add_playback_path, never the always-on
+        ch{id}_main/sub live-view paths.
+
+        A brand-new path's tracked timestamp starts at creation time, so it
+        already gets a full idle_ttl of grace before a client has to connect
+        — no separate "just created" grace period needed.
+        """
+        if not self._playback_paths:
+            return []
+        try:
+            resp = httpx.get(
+                f"http://{MEDIAMTX_HOST}:{API_PORT}/v3/paths/list",
+                auth=(MEDIAMTX_BACKEND_USER, AUTH_KEY),
+                timeout=5.0,
+            )
+            resp.raise_for_status()
+            items = {item["name"]: item for item in resp.json()["items"]}
+        except httpx.HTTPError:
+            return []
+
+        now = time.monotonic()
+        removed = []
+        for name, last_active in list(self._playback_paths.items()):
+            item = items.get(name)
+            if item is None:
+                # Already gone some other way (e.g. explicit stop raced this
+                # sweep) — drop the bookkeeping, nothing to delete.
+                self._playback_paths.pop(name, None)
+                continue
+            if item.get("readers"):
+                self._playback_paths[name] = now
+                continue
+            if now - last_active >= idle_ttl:
+                self.remove_playback_path(name)
+                removed.append(name)
+        return removed
 
     def capture_clip(self, name: str, duration_seconds: float, output_path: Path) -> None:
         """Capture `duration_seconds` of video from a playback path into an

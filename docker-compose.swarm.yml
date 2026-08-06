@@ -82,13 +82,23 @@ services:
       retries: 3
     deploy:
       replicas: 1
+      # 384M/1.0 was the original guess from before the container split
+      # (Phase 6). Real-load testing (standalone compose against the
+      # real DVR/cameras, LL-HLS connections across all 6 channels
+      # including channel 10's H.265->H.264 transcode, plus a playback
+      # and a download session) found it undersized: memory sat pinned
+      # at the 384M ceiling continuously rather than comfortably under
+      # it, and CPU held 71-99%+ of the 1.0 limit the whole time - both
+      # were already being throttled, not just "close." See
+      # ARCHITECTURE.md for the full numbers and the reconnect-churn
+      # caveat.
       resources:
         limits:
-          cpus: "1.0"
-          memory: 384M
+          cpus: "1.5"
+          memory: 768M
         reservations:
-          cpus: "0.1"
-          memory: 128M
+          cpus: "0.2"
+          memory: 256M
       restart_policy:
         condition: on-failure
       placement:

@@ -166,9 +166,26 @@ started and configured* differs.
 - **RTSP re-serve** (`127.0.0.1:8554`, loopback-only) exists purely so
   the backend can capture download clips with ffmpeg — see "Clip
   download design" below. Not for LAN/browser use.
-- Known gap: no TTL/GC for playback paths if a client abandons playback
-  without calling stop (e.g. tab closed). Fine for single-user local
-  use; revisit before packaging (Phase 6).
+- **Playback-path GC** (Phase 6): a client abandoning playback without
+  calling `/api/playback/stop` (tab closed, dead network) used to leak
+  its mediamtx path forever. `MediaBridge` now tracks every path it
+  registers via `add_playback_path` (name → last-active monotonic
+  timestamp, never touching the always-on `ch{id}_main/sub` live-view
+  paths) and a `gc_playback_paths()` sweep, run every 30s from a
+  background task in `app/main.py`'s `lifespan`, cross-checks that
+  against mediamtx's own `GET /v3/paths/list` — its `readers` field is
+  the authoritative "is anyone actually still watching this" signal, so
+  GC follows real mediamtx state instead of guessing from our own
+  side. A path idle (zero readers) for 60s gets deleted; a fresh path
+  gets that same 60s as connection grace for free, since its tracked
+  timestamp starts at creation. Verified against the real DVR
+  (bare-metal `run.sh`, alternate ports to avoid the production Swarm
+  deployment's routing-mesh-claimed `8888`/`8889` on this host): an
+  abandoned path (single fetch, no sustained reads) was gone within
+  ~90s; a path polled continuously for 110s+ (simulating a real open
+  tab) never got touched; stopping that polling led to cleanup ~45-66s
+  later; explicit `/api/playback/stop` still removes immediately,
+  unaffected by GC.
 
 ### H.265→H.264 transcode for main streams
 
@@ -316,6 +333,73 @@ browser check against the real domain showed all 6 channels reaching
 `live`, matching a standalone pre-deploy test against the real DVR
 (isolated Docker network, separate from the running production
 service) that caught the `add`-vs-`replace` bug above.
+
+**Known gap: mediamtx restarting alone loses live-view paths.** The
+idempotent-`replace` fix above covers `dvr-window` restarting without
+`mediamtx`; the reverse isn't handled. Live-view paths are only ever
+pushed once, at `dvr-window`'s own startup (`MediaBridge.start()`) —
+if `mediamtx` restarts on its own (crash, redeploy of just that
+service) while `dvr-window` keeps running, the fresh `mediamtx`
+process comes up with none of the `ch{id}_main/sub` paths registered
+and live view breaks until `dvr-window` itself also restarts. Found
+while re-creating just the `mediamtx` container during the Phase 6
+memory-limit re-check below (`ch1_main` HLS request returned `500`
+until both containers were recreated together). Not fixed here — out
+of scope for this round — but worth fixing before relying on
+`mediamtx`'s own `restart_policy` to recover unattended.
+
+### Memory/CPU limit re-check (Phase 6)
+
+The `384M`/`1.0` CPU limit was an initial guess made when `mediamtx`
+and the backend were still one conflated process (before the split
+above); splitting them made per-service usage measurable for the
+first time, but nobody had actually measured it. No SSH access to the
+production Swarm nodes to sample `docker stats` there directly, so
+this was measured by running the standalone `docker-compose.yml`
+stack locally against the real DVR/cameras instead (same DVR, real
+streams, just not the same physical node) — confirmed reachable from
+this environment, which turned out to itself be a node in the same
+Swarm cluster (its routing mesh already claims `8888`/`8889`/`8896`
+cluster-wide for the deployed production service, so this test used a
+fully self-consistent alternate-port copy of `mediamtx/base.yml` plus
+matching `MEDIAMTX_*` env vars, not just a host-side port remap, to
+avoid colliding with it).
+
+Real load: LL-HLS connections established and held against all 6
+configured channels (4 analog + both IP-proxy channels, including
+channel 10's H.265→H.264 transcode running inside the `mediamtx`
+container), plus one playback and one download session exercising
+`capture_clip`'s ffmpeg in the `dvr-window` container. (A real
+browser was tried first for this but its headless environment
+couldn't actually decode/render video — confirmed the HLS connections
+themselves were genuine and healthy throughout, continuous `200`s on
+mediamtx's low-latency blocking-playlist requests, so this doesn't
+undermine the mediamtx-side measurement, just meant driving the load
+directly instead of through a rendered page.)
+
+- **`dvr-window`**: 44-68MiB peak against the original 128M limit the
+  whole time — comfortable, left unchanged.
+- **`mediamtx`**: pinned at 381-388MiB against the *original* 384M
+  limit continuously (91%, 86%, 89%... never dropping below ~381MiB)
+  with CPU sustained at 71-91% of the 1.0 limit — i.e. already being
+  throttled by both limits under just this modest real load, not
+  merely "close." Re-tested with the ceiling temporarily raised
+  (900M/2.0 CPU, to see the real number instead of one clipped by the
+  cap it was already hitting): climbed steadily from ~398MiB to
+  ~588MiB over the measurement window without clearly plateauing —
+  consistent with mediamtx's own HLS session cleanup lagging behind
+  reconnect churn (502 sessions created vs. 453 closed in the
+  container's logs over the test), a real pattern this project's own
+  Phase 10 reconnect-with-backoff logic can trigger on a flaky link.
+- **Landed on `768M`/`1.5` CPU** (limit) and `256M`/`0.2` CPU
+  (reservation) for `mediamtx` in both compose files: roughly double
+  the confirmed real floor from the clean (non-churning) connections,
+  enough headroom that a moderate reconnect episode shouldn't hit the
+  ceiling, without guessing arbitrarily high off one noisy churn
+  sample that hadn't found its own plateau. Worth re-checking with
+  real `docker stats` on the actual production nodes if that access
+  ever becomes available, and worth keeping an eye on mediamtx's own
+  memory after any period of flaky connectivity in practice.
 
 ## Clip download design
 
