@@ -26,6 +26,14 @@ SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "tmp" / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+async def _gc_playback_paths_loop(bridge: MediaBridge) -> None:
+    while True:
+        await asyncio.sleep(30)
+        removed = await asyncio.to_thread(bridge.gc_playback_paths)
+        for name in removed:
+            print(f"[gc] removed abandoned playback path: {name}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     isapi = ISAPIClient(settings.device)
@@ -38,9 +46,12 @@ async def lifespan(app: FastAPI):
     bridge.start(settings.device, channels)
     app.state.bridge = bridge
 
+    gc_task = asyncio.create_task(_gc_playback_paths_loop(bridge))
+
     try:
         yield
     finally:
+        gc_task.cancel()
         bridge.stop()
         isapi.close()
 

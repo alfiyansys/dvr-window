@@ -22,7 +22,7 @@ Rationale in `ARCHITECTURE.md`.
 | 3 | ✅ done | PTZ — channels 9/10 (IP-proxy cameras) got PTZ hardware; `/api/ptz/{channelId}/{continuous,stop}` + live-view D-pad. Analog channels 1-4 still have no PTZ hardware. |
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
 | 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
-| 6 | ⬜ next | Polish — playback-path GC, event/alarm stream. mediamtx process supervision/health check (see design below, found via a real production incident) is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Remaining Phase 6 items (playback-path GC, event/alarm stream, memory-limit re-check) still open. Packaging itself is done and Docker-only by decision — see `ARCHITECTURE.md`. |
+| 6 | ⬜ next | Polish — mediamtx process supervision/health check is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Playback-path GC and the memory/CPU limit re-check are ✅ done — design below. Packaging is done and Docker-only by decision — see `ARCHITECTURE.md`. Event/alarm stream is **blocked**, not attempted: real-device recon found the ISAPI account gets `403 lowPrivilege` on both the push event stream and the poll-based motion-detection status, motion detection itself is disabled, and the DVR has no alarm inputs configured — nothing to build against under the current account/config. Design below. |
 | 7 | ✅ done | Continuous playback across recording-segment boundaries — auto-advance into the next segment instead of freezing at the end of one; skip forward over a real recording gap instead of stopping. See `ARCHITECTURE.md` "Continuous playback across recording segments". |
 | 8 | ✅ done | Day timeline scrubber for playback — horizontal bar showing the loaded day's recorded segments/gaps, click-to-seek, reusing the existing playback-start/gap-clamp mechanism. See `ARCHITECTURE.md` "Day timeline scrubber". |
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
@@ -35,6 +35,42 @@ Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
 duplicated here — this file tracks *what's done and what's next*, not
 *how it works*.
+
+## Phase 6 design: playback-path GC, memory/CPU re-check, event/alarm stream
+
+Three remaining Phase 6 items, two done this round:
+
+- **Playback-path GC** (done): a client abandoning playback without
+  calling `/api/playback/stop` (closed tab, dead network) used to leak
+  its mediamtx path forever — `ARCHITECTURE.md`'s own documented known
+  gap. `MediaBridge` now tracks every path it registers and sweeps
+  every 30s, cross-checking mediamtx's own `GET /v3/paths/list`
+  readers to delete anything idle 60s+. Verified against the real DVR:
+  an abandoned path was gone within ~90s, an actively-read path
+  survived 110s+ untouched, explicit stop still removes immediately.
+  Full design and verification detail in `ARCHITECTURE.md` under
+  "mediamtx as a separate Swarm service" (the playback-path bullet).
+- **Memory/CPU limit re-check** (done): the `384M`/`1.0` CPU limits
+  were an unmeasured guess from before the Swarm split. Real-load
+  testing (standalone compose against the real DVR, all 6 channels'
+  LL-HLS connections plus a playback and download session) found
+  mediamtx pinned at the ceiling continuously under just that load —
+  already throttled, not merely close. Raised to `768M`/`1.5` CPU
+  (roughly double the confirmed clean-connection floor). Full numbers,
+  methodology, and the reconnect-churn caveat in `ARCHITECTURE.md`
+  under "Memory/CPU limit re-check (Phase 6)".
+- **Event/alarm stream** (blocked, not attempted): real-device recon
+  against the actual DVR found the ISAPI account gets `403
+  lowPrivilege` on both `/ISAPI/Event/notification/alertStream` (the
+  push event stream) and the poll-based
+  `.../motionDetection/status` alternative — the same class of
+  privilege limit `MEMORY.md` already documents for `PUT` config
+  changes, now also covering the one real event mechanism this
+  firmware exposes. Motion detection is currently disabled on the DVR
+  itself, and its IO alarm-input list is empty (no physical alarm
+  inputs configured), so even a privilege upgrade alone wouldn't be
+  enough today. Revisit if/when there's both an elevated account and
+  motion detection turned on.
 
 ## Phase 9 design: shared-key auth
 
@@ -386,8 +422,7 @@ cycles.
 
 ## Next step
 
-Phases 12 and 13 are done. Remaining work is the rest of Phase 6:
-playback-path garbage collection (see `ARCHITECTURE.md` known gaps),
-event/alarm stream, and a memory-limit re-check now that mediamtx runs
-as its own Swarm service (splitting made per-service usage measurable
-for the first time).
+Playback-path GC and the memory/CPU limit re-check are done (see
+"Phase 6 design" above). Event/alarm stream is blocked on DVR account
+privilege and config, not code — revisit if that changes. No other
+Phase 6 items are currently open.
