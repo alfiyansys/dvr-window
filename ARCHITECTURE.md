@@ -166,9 +166,26 @@ started and configured* differs.
 - **RTSP re-serve** (`127.0.0.1:8554`, loopback-only) exists purely so
   the backend can capture download clips with ffmpeg — see "Clip
   download design" below. Not for LAN/browser use.
-- Known gap: no TTL/GC for playback paths if a client abandons playback
-  without calling stop (e.g. tab closed). Fine for single-user local
-  use; revisit before packaging (Phase 6).
+- **Playback-path GC** (Phase 6): a client abandoning playback without
+  calling `/api/playback/stop` (tab closed, dead network) used to leak
+  its mediamtx path forever. `MediaBridge` now tracks every path it
+  registers via `add_playback_path` (name → last-active monotonic
+  timestamp, never touching the always-on `ch{id}_main/sub` live-view
+  paths) and a `gc_playback_paths()` sweep, run every 30s from a
+  background task in `app/main.py`'s `lifespan`, cross-checks that
+  against mediamtx's own `GET /v3/paths/list` — its `readers` field is
+  the authoritative "is anyone actually still watching this" signal, so
+  GC follows real mediamtx state instead of guessing from our own
+  side. A path idle (zero readers) for 60s gets deleted; a fresh path
+  gets that same 60s as connection grace for free, since its tracked
+  timestamp starts at creation. Verified against the real DVR
+  (bare-metal `run.sh`, alternate ports to avoid the production Swarm
+  deployment's routing-mesh-claimed `8888`/`8889` on this host): an
+  abandoned path (single fetch, no sustained reads) was gone within
+  ~90s; a path polled continuously for 110s+ (simulating a real open
+  tab) never got touched; stopping that polling led to cleanup ~45-66s
+  later; explicit `/api/playback/stop` still removes immediately,
+  unaffected by GC.
 
 ### H.265→H.264 transcode for main streams
 
