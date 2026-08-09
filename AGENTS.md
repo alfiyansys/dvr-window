@@ -65,18 +65,6 @@ trust the ISAPI/RTSP response alone — extract a frame
 overlay, which is how the two playback bugs in `ARCHITECTURE.md` were
 actually confirmed.
 
-**Not every environment can actually reach the DVR.** It lives on its
-own LAN (`HIKVISION_HOST` in `.env`); a coding sandbox or CI runner may
-sit on a different subnet with no route to it. Check reachability
-first (a TCP connect attempt, `ip route get <host>`) rather than
-assuming it — and rather than claiming a change was "verified against
-the real DVR" from just reading the code. If it's unreachable, say so
-explicitly and hand verification to the user (tell them exactly what
-to check) instead of guessing at a workaround — VPN/Tailscale subnet
-routes, alternate hosts, etc. — without asking first. This project's
-network topology is the user's infrastructure, not something to probe
-unprompted.
-
 ## Read this before touching ISAPI timestamps or playback
 
 The DVR's ISAPI timestamps are labeled UTC (`Z` suffix) but are
