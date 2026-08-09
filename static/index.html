@@ -399,6 +399,13 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // while the stream is healthy, matching this file's existing "costs
   // nothing while healthy" reasoning for the frozen-frame watchdog.
   function checkDrift() {
+    // Same reasoning as the armLagWatchdog guard below — currentTime is
+    // *expected* to be behind the live edge during a deliberate Phase 14
+    // duty-cycle pause, that's not real drift to escalate.
+    if (backgrounded) {
+      driftSinceMs = null;
+      return false;
+    }
     if (!hls || hls.liveSyncPosition == null || !Number.isFinite(hls.liveSyncPosition)) {
       driftSinceMs = null;
       return false;
@@ -549,6 +556,11 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // is the actual "frames are flowing" signal, so that's the one
   // place "live" gets set from here on.
   video.addEventListener('playing', () => {
+    // Also fires for our own Phase 14 duty-cycle resumes (bgOn) — leave
+    // the status label as whatever it last said rather than reasserting
+    // "live" from a deliberately throttled burst; the stream is fine,
+    // just intentionally deprioritized, not something to relabel.
+    if (backgrounded) return;
     setStatus('live', 'ok');
     armLagWatchdog();
   });
@@ -563,6 +575,10 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // drops/duplicates frames under load (see ffmpeg's own `dup=`/
   // `drop=` counters in the run.sh log) without ever fully stalling.
   video.addEventListener('timeupdate', () => {
+    // Same as the 'playing' guard above — a Phase 14 duty-cycle burst
+    // fires real timeupdate events too, but shouldn't touch the status
+    // label or re-arm/escalate anything.
+    if (backgrounded) return;
     // Frames advancing doesn't necessarily mean "live" — checkDrift()
     // catches the case where they're advancing from well behind the live
     // edge (see PLAN.md "Phase 12 design"). Still calling armLagWatchdog()
@@ -605,6 +621,11 @@ function setupHlsPlayer(video, status, hlsUrl) {
       scheduleRestart();
     });
   }
+
+  // Exposed so openOverlay/closeOverlay/showAdjacent (outside this
+  // closure) can throttle/restore this cell's player without duplicating
+  // any hls.js lifecycle logic — see PLAN.md "Phase 14 design".
+  video._player = { throttleBackground, restoreForeground };
 
   start();
 }
