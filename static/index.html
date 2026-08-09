@@ -421,6 +421,65 @@ function setupHlsPlayer(video, status, hlsUrl) {
     }
   }
 
+  // Phase 14: while a *different* cell's modal is focused, this cell
+  // duty-cycles instead of running full-speed (bandwidth/CPU contention
+  // with the focused stream) or fully freezing (a dead thumbnail) — see
+  // PLAN.md "Phase 14 design". stopLoad()/pause() halt new segment
+  // fetches and decode immediately; a chained one-shot-timer cycle (same
+  // style as the lag watchdog above, not setInterval) briefly resumes for
+  // BG_ON_MS every BG_OFF_MS to pull a fresh frame or two before pausing
+  // again. hls stays null on the native-Safari fallback path, so bgOn/
+  // bgOff only pause/play the <video> itself there — still cuts its
+  // segment fetching, just via the browser's own native HLS engine
+  // instead of hls.js.
+  const BG_OFF_MS = 10000;
+  const BG_ON_MS = 2000;
+  let backgrounded = false;
+  let bgTimer = null;
+  let bgBurstTimer = null;
+
+  function clearBgTimers() {
+    clearTimeout(bgTimer); bgTimer = null;
+    clearTimeout(bgBurstTimer); bgBurstTimer = null;
+  }
+
+  function bgOff() {
+    if (hls) hls.stopLoad();
+    video.pause();
+  }
+
+  function bgOn() {
+    if (hls) hls.startLoad();
+    video.play().catch(() => {});
+  }
+
+  function scheduleBgCycle() {
+    bgTimer = setTimeout(() => {
+      if (!backgrounded) return;
+      bgOn();
+      bgBurstTimer = setTimeout(() => {
+        if (!backgrounded) return;
+        bgOff();
+        scheduleBgCycle();
+      }, BG_ON_MS);
+    }, BG_OFF_MS);
+  }
+
+  function throttleBackground() {
+    if (backgrounded) return;
+    backgrounded = true;
+    clearBgTimers();
+    bgOff();
+    scheduleBgCycle();
+  }
+
+  function restoreForeground() {
+    if (!backgrounded) return;
+    backgrounded = false;
+    clearBgTimers();
+    bgOn();
+  }
+
   function armLagWatchdog() {
     clearLagTimers();
     // Backgrounded tabs get their rendering/decoding throttled by the
@@ -428,6 +487,11 @@ function setupHlsPlayer(video, status, hlsUrl) {
     // even start the countdown while hidden (see visibilitychange
     // listener below, which re-arms with a fresh window on return).
     if (document.visibilityState !== 'visible') return;
+    // Same reasoning for our own deliberate duty-cycle pauses (above) —
+    // the lag/drift watchdogs exist to catch and escalate an
+    // *unintentional* stall, and would otherwise "fix" this intentional
+    // one every single off-cycle, defeating the point.
+    if (backgrounded) return;
     lagStatusTimer = setTimeout(() => {
       setStatus('lagging…', 'loading');
       lagRebuildTimer = setTimeout(() => {
