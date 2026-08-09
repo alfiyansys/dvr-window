@@ -161,12 +161,32 @@ function syncOverlayPing(cell) {
   overlayPingObserver.observe(cellPing, { childList: true, characterData: true, subtree: true });
 }
 
+// Phase 14: give the focused cell's player full speed back and duty-cycle
+// every other cell's — see PLAN.md "Phase 14 design". `video._player` is
+// only set once setupHlsPlayer's start() has run for that cell, hence the
+// optional chaining (a cell whose player hasn't initialized yet has
+// nothing to throttle/restore regardless).
+function throttleOtherCells(exceptCell) {
+  for (const other of document.querySelectorAll('#grid .cell')) {
+    if (other === exceptCell) continue;
+    other.querySelector('video')?._player?.throttleBackground();
+  }
+}
+
+function restoreAllCells() {
+  for (const other of document.querySelectorAll('#grid .cell')) {
+    other.querySelector('video')?._player?.restoreForeground();
+  }
+}
+
 function openOverlay(cell, name, channelId, ptzEnabled) {
   const slot = document.getElementById('overlaySlot');
   const video = cell.querySelector('video');
   cell.dataset.videoHome = '1';
   video._homeCell = cell;
   slot.appendChild(video);
+  video._player?.restoreForeground();
+  throttleOtherCells(cell);
   document.getElementById('overlayName').textContent = name;
   syncOverlayStatus(cell);
   syncOverlayPing(cell);
@@ -263,6 +283,7 @@ document.getElementById('overlayFullscreen').onclick = toggleFullscreen;
 function closeOverlay() {
   if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
   returnSlottedVideoHome();
+  restoreAllCells();
   ptzStop();
   if (overlayStatusObserver) { overlayStatusObserver.disconnect(); overlayStatusObserver = null; }
   if (overlayPingObserver) { overlayPingObserver.disconnect(); overlayPingObserver = null; }
