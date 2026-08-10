@@ -496,6 +496,17 @@ function setupHlsPlayer(video, status, hlsUrl) {
   function throttleBackground() {
     if (backgrounded) return;
     backgrounded = true;
+    // A lag-watchdog timer armed just before backgrounding began (e.g.
+    // from the last timeupdate a moment ago) is still mid-countdown here
+    // - the `backgrounded` guards in armLagWatchdog()/playing/timeupdate
+    // only stop it from being *re*-armed, they don't cancel one already
+    // ticking. Left alone, confirmed against the real DVR: it still
+    // fires setStatus('lagging…') and then, LAG_REBUILD_MS later,
+    // hls.destroy()+scheduleRestart() - a full unwanted teardown of a
+    // stream that was only ever intentionally paused, plus its own
+    // unguarded setStatus('reconnecting…'). Same cancellation the
+    // visibilitychange-hidden branch already does for the same reason.
+    clearLagTimers();
     clearBgTimers();
     bgOff();
     scheduleBgCycle();
