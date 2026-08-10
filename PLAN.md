@@ -586,6 +586,35 @@ one real bug found:**
    recurrence of the stuck-`reconnecting…` or frozen-`MediaSource`
    failure modes); Prev/Next handoff and modal close both restored
    every cell correctly.
+5. **Third bug, reported by the user in real use (2026-08-10)**:
+   background cells going visibly black during a modal session, still
+   black for a moment after closing it. Root cause: the
+   `Hls.Events.ERROR` handler's final escalation tier — a full rebuild
+   (`hls.destroy()` + new `Hls()` + `attachMedia()`) — ran immediately
+   even while backgrounded. Fix #1 above made sure this tier still
+   *runs* while backgrounded (rather than leaving the stream stuck),
+   but running it blanks the video to black immediately, since a fresh
+   `MediaSource` starts with zero buffered data — and while
+   backgrounded, that fresh instance only gets `BG_ON_MS` (2s) per duty
+   cycle to load anything before being paused again, often not enough
+   for even one frame, so the cell can stay visibly black for many
+   cycles. Fixed by deferring the rebuild itself: a `pendingRebuild`
+   flag is set instead of rebuilding immediately, and `restoreForeground()`
+   performs the actual rebuild only once the cell is about to be looked
+   at again — until then the stale (but never-destroyed) `hls` instance
+   just sits there showing its last good frame, frozen rather than
+   black. Applied the same treatment to the Safari-native fallback's
+   `error` listener (reassigning `video.src` has the same blanking
+   effect as a full rebuild). Verified against the real DVR by forcing
+   a genuine, sustained fatal error on a backgrounded cell (an XHR
+   interception redirecting that channel's requests to a closed port,
+   not just reasoning about it) for 215+ seconds: the video stayed
+   frozen on its last good frame throughout — same non-black pixel
+   sample the entire time — with `status` correctly staying `live`
+   throughout rather than flashing `reconnecting…`; closing the modal
+   correctly triggered the deferred rebuild, visibly (and correctly)
+   showing `reconnecting…` while the still-simulated failure persisted,
+   then recovering cleanly once the simulated failure was lifted.
 
 ## Phase 15.1 design: classical stream enhancement (pipeline + shader)
 
