@@ -31,7 +31,9 @@ Rationale in `ARCHITECTURE.md`.
 | 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
 | 14 | ✅ done | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism, the `reconnecting…`-status bug found during verification, and a second stale-lag-timer bug found while re-verifying the fix are all fixed and confirmed against the real DVR (2026-08-10) — background cells held `live` across 5+ minutes/many duty cycles, Prev/Next handoff and modal close both restore correctly. Design below. |
-| 15 | ⬜ next | Client-side real-time video enhancement for the focused/modal stream only (WebGL2 shader pipeline; user-selectable mode, staged incrementally toward an optional ML mode). Design below. |
+| 15.1 | ⬜ next | Classical real-time stream enhancement for the focused/modal stream only — WebGL2 shader pipeline (auto-levels/gamma + unsharp mask combined pass), `Off`/`Classical` selector, always-optional fallback to plain `<video>`. First, independently-shippable increment of the Phase 15 enhancement pipeline — not blocked on any ML work below. Design below. |
+| 15.2 | ⬜ later | ML groundwork for stream enhancement, not yet user-facing — pick and vendor a lightweight browser-capable model + runtime (`static/vendor/`, no CDN), land it as a dev-only `ml` processor behind a flag so real FPS/quality can be measured against this DVR's actual streams before committing to ship it. Depends on 15.1's pipeline/canvas/lifecycle plumbing. Design below. |
+| 15.3 | ⬜ later | `AI` becomes a real, user-facing selector option — gated by a runtime capability/performance check that auto-falls-back to `Classical` on a device too weak for the ML pass. Depends on 15.2 having already proven the model/runtime choice on real hardware. Design below. |
 | 16 | ✅ done | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which previously required a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Implemented and verified (2026-08-10): recreated the exact incident locally (`docker-compose.yml`'s network-mode split, killed and fully recreated the `mediamtx` container while `dvr-window` kept running) — confirmed the fresh container came up with zero paths, then self-healed within one 30s sweep with no `dvr-window` restart, HLS confirmed actually serving again afterward. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
@@ -585,7 +587,7 @@ one real bug found:**
    failure modes); Prev/Next handoff and modal close both restored
    every cell correctly.
 
-## Phase 15 design: client-side real-time stream enhancement (focused stream only, staged toward ML)
+## Phase 15.1 design: classical stream enhancement (pipeline + shader)
 
 Builds directly on Phase 14: once the focused camera's stream is the
 one getting priority bandwidth/CPU while its modal is open, that same
@@ -597,7 +599,8 @@ scoped to the one `<video>` currently sitting in `#overlaySlot`, never
 the grid.
 
 **Architecture — one pipeline, pluggable processors, so "which method"
-is a config choice, not a rewrite:**
+is a config choice, not a rewrite** (this shared plumbing is what makes
+15.2/15.3 additive later rather than a rewrite):
 
 - `openOverlay()` creates a WebGL2 `<canvas>` sized to match the
   `<video>` and stacks it directly over it in `#overlaySlot`; the
@@ -619,29 +622,28 @@ is a config choice, not a rewrite:**
   texture, runs whichever **processor** is currently selected
   (`off` / `classical` / later `ml`), writes to the visible canvas.
   Processors are swappable behind this one interface specifically so
-  the incremental stages below (classical now, ML later) don't require
-  redoing the canvas/texture/lifecycle plumbing — only a new processor
-  gets added each time.
+  15.2/15.3 below don't require redoing the canvas/texture/lifecycle
+  plumbing — only a new processor gets added each time.
 
 **Method selector — user picks, not auto-decided:**
 
 - A control in `.overlay-side` (alongside Snapshot/Playback/Fullscreen)
   cycling `Off` (default) / `Classical` — `AI` is added to this same
-  list only once the ML stage below actually ships, not built as a
-  disabled placeholder now (a "coming soon" option that does nothing
-  is worse than no option). Choice persists in `localStorage`
-  (`enhanceMode`, same pattern `static/auth.js` already uses for the
-  auth key) — one global preference applied to whichever camera is
-  currently focused, not remembered per-channel; simplest thing that
-  works, revisit only if real usage shows people want different modes
-  per camera (e.g. always-classical on the noisy IR channels, off on
-  the already-sharp ones).
+  list only once 15.3 actually ships, not built as a disabled
+  placeholder now (a "coming soon" option that does nothing is worse
+  than no option). Choice persists in `localStorage` (`enhanceMode`,
+  same pattern `static/auth.js` already uses for the auth key) — one
+  global preference applied to whichever camera is currently focused,
+  not remembered per-channel; simplest thing that works, revisit only
+  if real usage shows people want different modes per camera (e.g.
+  always-classical on the noisy IR channels, off on the already-sharp
+  ones).
 - `off` is a true passthrough (canvas layer not even created) — zero
   overhead for anyone who doesn't want this, and the default for
   everyone until they opt in.
 
-**Classical processor (this phase's actual deliverable) — two cheap
-single-pass shaders:**
+**Classical processor (this sub-phase's actual deliverable) — two
+cheap single-pass shaders:**
 
 - **Auto-levels / gamma boost**: stretches the frame's black/white
   point and applies a configurable gamma lift — targets this DVR's
@@ -667,43 +669,6 @@ runtime error inside a processor all fall back to plain unenhanced
 `<video>` — never to a broken or blank picture, and never by retrying
 in a loop.
 
-**Incremental roadmap toward ML — staged so nothing downstream is
-built before the stage that justifies it is proven:**
-
-- **15.1 (this round's scope)** — the pipeline/canvas/lifecycle
-  plumbing above, the mode selector (`Off`/`Classical` only), and the
-  classical processor. Ships alone as a complete, useful feature —
-  intentionally not blocked on any ML work below.
-- **15.2 — ML groundwork, not yet user-facing**: pick a lightweight
-  browser-capable model (a small super-resolution net like ESPCN/FSRCNN,
-  or a denoise-focused one — final pick needs benchmarking against
-  real footage from this DVR, not assumed) and a runtime
-  (TensorFlow.js or ONNX Runtime Web, WebGL/WebGPU backend). Whatever
-  is chosen must be **vendored locally** (`static/vendor/`,
-  gitignored-model-weights-or-not decided at that time) per `AGENTS.md`'s
-  existing no-CDN-dependency rule for frontend deps — the model weights
-  themselves only fetched lazily when a user actually selects `AI`
-  mode later, never on page load, so nobody pays that download for a
-  feature they never turn on. This stage lands the `ml` processor
-  behind a dev-only flag, not in the public selector yet, so real FPS/
-  quality can be measured against this DVR's actual streams before
-  committing to ship it.
-- **15.3 — `AI` becomes a real selector option**, gated by a runtime
-  capability/performance check (e.g. a brief benchmark pass on
-  pipeline init) that auto-falls-back to `Classical` if the device
-  can't sustain acceptable frame rate — the same "always have an
-  accepted fallback" policy as WebGL2-unavailable above, applied to
-  "WebGL2 exists but this device's GPU is too weak for the ML pass
-  specifically." Requires real-device verification (per `AGENTS.md`)
-  on more than one client, not just the dev machine, before this stage
-  is considered done — ML inference cost varies far more by hardware
-  than the classical shader pass does.
-- **15.4 (explicit non-goal until 15.1-15.3 are proven)** — per-camera
-  default modes, auto-switching heuristics (e.g. auto-`Classical` on
-  known-dark channels), or any server-side involvement. Not speced
-  further here; premature ahead of real usage data from the earlier
-  stages.
-
 **Verification plan** (per `AGENTS.md` — real DVR and real client
 hardware, not just reasoned about):
 
@@ -719,10 +684,55 @@ hardware, not just reasoned about):
 - Confirm Prev/Next (`showAdjacent`) correctly re-targets the canvas to
   the newly-focused channel's video with no stale frame or leaked
   WebGL context from the previous one.
-- (15.2/15.3 only, once reached) confirm the ML processor's vendored
-  weights load with no network calls beyond this LAN/the local
-  service, and that the perf-fallback genuinely engages on a
-  deliberately underpowered test client.
+
+## Phase 15.2 design: ML groundwork for stream enhancement (dev-only, not yet user-facing)
+
+Staged separately from 15.3 so nothing downstream (a public `AI`
+option) gets built before the model/runtime choice is actually proven
+against this DVR's real footage — this sub-phase is pure groundwork,
+with no visible change for a normal user.
+
+- Pick a lightweight browser-capable model (a small super-resolution
+  net like ESPCN/FSRCNN, or a denoise-focused one — final pick needs
+  benchmarking against real footage from this DVR, not assumed) and a
+  runtime (TensorFlow.js or ONNX Runtime Web, WebGL/WebGPU backend).
+- Whatever is chosen must be **vendored locally** (`static/vendor/`,
+  gitignored-model-weights-or-not decided at that time) per `AGENTS.md`'s
+  existing no-CDN-dependency rule for frontend deps — the model weights
+  themselves only fetched lazily when a user actually selects `AI`
+  mode later (once 15.3 ships), never on page load, so nobody pays
+  that download for a feature they never turn on.
+- Lands the `ml` processor (same `EnhancementPipeline` interface 15.1
+  already defined) behind a dev-only flag, not in the public selector
+  yet, so real FPS/quality can be measured against this DVR's actual
+  streams before committing to ship it.
+- Depends on 15.1's pipeline/canvas/lifecycle plumbing already being in
+  place — no new plumbing of its own.
+
+**Verification plan**: confirm the vendored model/runtime loads and
+runs the `ml` processor (behind its dev-only flag) with no network
+calls beyond this LAN/the local service, and record real FPS/quality
+measurements against actual footage from this DVR — the data this
+stage exists to produce, and what 15.3's go/no-go decision rests on.
+
+## Phase 15.3 design: `AI` becomes a real selector option
+
+- `AI` is added to the `Off`/`Classical`/`AI` selector (15.1) as a
+  real, user-facing choice — gated by a runtime capability/performance
+  check (e.g. a brief benchmark pass on pipeline init) that
+  auto-falls-back to `Classical` if the device can't sustain acceptable
+  frame rate. Same "always have an accepted fallback" policy as
+  WebGL2-unavailable in 15.1, applied to "WebGL2 exists but this
+  device's GPU is too weak for the ML pass specifically."
+- Depends on 15.2 having already benchmarked and settled on a model/
+  runtime — this sub-phase is the productionization of that choice,
+  not a new one.
+
+**Verification plan**: real-device verification (per `AGENTS.md`) on
+more than one client, not just the dev machine — ML inference cost
+varies far more by hardware than the classical shader pass does.
+Confirm the perf-fallback genuinely engages on a deliberately
+underpowered test client, not just that it compiles.
 
 ## Phase 16 design: self-heal mediamtx live-view paths after an independent restart
 
@@ -826,12 +836,17 @@ playlist returning `200` afterward, not just that the path existed.
   gets `403 lowPrivilege` on both the push and poll mechanisms, motion
   detection is disabled, and no alarm inputs are configured on the
   DVR. Revisit only if the DVR account/config changes.
+- Per-camera default enhancement modes, auto-switching heuristics (e.g.
+  auto-`Classical` on known-dark channels), or any server-side
+  involvement in stream enhancement (Phase 15.4) — explicit non-goal
+  until 15.1-15.3 are proven; premature ahead of real usage data from
+  those earlier stages.
 
 ## Next step
 
 Phase 6 is fully done. Phases 14 (focused-stream throttling) and 16
 (mediamtx live-view path self-heal) are both done and deployed to
-production (2026-08-10). Phase 15's first stage (15.1: client-side
-classical enhancement for the focused stream, with the ML stages
-15.2-15.4 staged for later — design above) is next up for
-implementation.
+production (2026-08-10). Phase 15.1 (classical stream enhancement —
+design above) is next up for implementation; 15.2 (ML groundwork) and
+15.3 (`AI` as a real selector option) follow in order, each depending
+on the one before it proving out.
