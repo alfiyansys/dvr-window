@@ -32,6 +32,7 @@ Rationale in `ARCHITECTURE.md`.
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
 | 14 | ⬜ next | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Design below. |
 | 15 | ⬜ next | Client-side real-time video enhancement for the focused/modal stream only (WebGL2 shader pipeline; user-selectable mode, staged incrementally toward an optional ML mode). Design below. |
+| 16 | ⬜ next | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which today requires a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -287,8 +288,11 @@ service", not duplicated here.
 Still open, unrelated to the split itself: re-checking each
 container's memory limit against real peak usage (the original `384M`
 guess was for both processes conflated together; splitting at least
-makes this measurable per-service now) and surfacing a log line if
-mediamtx ever exits unexpectedly.
+makes this measurable per-service now) — done, see "Memory/CPU limit
+re-check (Phase 6)" in `ARCHITECTURE.md` — and the path-loss gap itself
+(Phase 16 design below), which is the sharper version of "surfacing a
+log line if mediamtx ever exits unexpectedly": logging alone wouldn't
+have prevented the 2026-08-10 incident, only reconciliation would.
 
 ## Phase 12 design: fix silent live-view drift (advancing but stale)
 
@@ -642,6 +646,72 @@ hardware, not just reasoned about):
   service, and that the perf-fallback genuinely engages on a
   deliberately underpowered test client.
 
+## Phase 16 design: self-heal mediamtx live-view paths after an independent restart
+
+**Problem**, already named as a known gap when mediamtx was split into
+its own Swarm service (`ARCHITECTURE.md`, "Known gap: mediamtx
+restarting alone loses live-view paths"): `MediaBridge.start()` pushes
+every `ch{id}_main/sub` path into mediamtx exactly once, at
+`dvr-window`'s *own* startup. If `mediamtx` restarts on its own —
+OOM-kill, crash, a redeploy of just that service — the fresh instance
+comes up with zero paths registered, and stays that way (every HLS/
+WebRTC request for a channel fails) until `dvr-window` itself also
+restarts. Deferred at the time as out of scope for that round.
+
+**Confirmed as a real, not theoretical, production gap (2026-08-10)**:
+`mediamtx` on `sm-qohelet`/`sw-david01` was OOM-killed (exit 137) under
+a stale `384M`/`1.0` CPU limit that had drifted out of sync with the
+repo's already-updated `768M`/`1.5` CPU recommendation (a separate
+config-drift issue, fixed by redeploying the corrected limits — see
+"Memory/CPU limit re-check (Phase 6)" in `ARCHITECTURE.md`). That
+alone reduces how *often* mediamtx gets OOM-killed, but does nothing
+for what happens the next time it restarts for any reason: live view
+read as an endless client-side reconnect loop until a manual `docker
+service update --force dvr-window_dvr-window` re-pushed the paths.
+
+**Approach**: extend the existing playback-path GC sweep
+(`MediaBridge`, Phase 6 — already polls mediamtx's own `GET /v3/paths/
+list` every 30s to garbage-collect abandoned playback paths) to also
+verify the live-view paths are present, rather than adding a second
+polling loop:
+
+- On each 30s sweep, check that every expected `ch{id}_main/sub` name
+  appears in the same `paths/list` response already being fetched for
+  GC.
+- Any missing → re-push via the same idempotent `POST /v3/config/
+  paths/replace/{name}` `_add_path` already uses at startup (confirmed
+  safe to call repeatedly — that's the whole reason `replace` was
+  chosen over `add` originally, see "Path registration is idempotent"
+  in `ARCHITECTURE.md`).
+- Bounds recovery time to one GC cycle (≤30s) after mediamtx comes
+  back, instead of indefinitely until someone notices and manually
+  restarts `dvr-window` — closing the gap without reimplementing
+  mediamtx's own crash-restart (Swarm's `restart_policy` already
+  handles that part fine, per the Phase 6 design above).
+- Log a line when a re-push actually happens (missing paths found and
+  restored) — the original "surfacing a log line" idea from the Phase
+  6 design, but attached to the moment that matters (paths were
+  actually gone) rather than to mediamtx's exit event itself, which
+  `dvr-window` has no direct visibility into anyway (they're separate
+  containers).
+
+**Open question to resolve before implementing**: whether to
+distinguish "mediamtx restarted and lost paths" from "mediamtx is
+still starting up and hasn't been pushed to yet" (e.g. right after a
+fresh `docker stack deploy` of both services together, before
+`dvr-window`'s own startup push has run) — the reconciliation sweep
+firing during that brief legitimate window should just push paths
+early/harmlessly, not log a spurious "recovered from a gap" line.
+
+**Verification plan** (per `AGENTS.md` — against the real DVR, not
+just reasoned about): simulate the real incident directly — kill the
+`mediamtx` container while `dvr-window` keeps running (matches how
+this was found originally, per the Phase 6 design's "Known gap"
+discovery), confirm live view is broken immediately after, then
+confirm it self-recovers within one GC cycle with no manual
+intervention, and confirm the new log line appears exactly once per
+genuine recovery, not on every sweep.
+
 ## Non-goals (for now)
 
 - Two-way audio talk-back.
@@ -659,7 +729,11 @@ Phase 14 (prioritize focused-camera stream speed via background
 throttling — design above) is next up for implementation, followed by
 Phase 15's first stage (15.1: client-side classical enhancement for
 the focused stream, with the ML stages 15.2-15.4 staged for later —
-design above). Playback-path GC and the memory/CPU limit re-check are
-done (see "Phase 6 design" above). Event/alarm stream is blocked on
-DVR account privilege and config, not code — revisit if that changes.
-No other Phase 6 items are currently open.
+design above). Phase 16 (self-heal mediamtx live-view paths after an
+independent restart — design above) was added 2026-08-10 after a real
+production incident and should be prioritized alongside/ahead of 14/15
+given it's a reliability gap, not a feature. Playback-path GC and the
+memory/CPU limit re-check are done (see "Phase 6 design" above).
+Event/alarm stream is blocked on DVR account privilege and config, not
+code — revisit if that changes. No other Phase 6 items are currently
+open.
