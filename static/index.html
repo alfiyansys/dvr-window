@@ -28,6 +28,10 @@
   .overlay.open { display: flex; }
   .overlay-box { max-width: 1280px; width: 100%; max-height: calc(100vh - 64px); background: #000; border: 1px solid #333; border-radius: 6px; overflow-x: hidden; overflow-y: auto; }
   .overlay-box video { display: block; margin: 0 auto; background: #000; max-width: 100%; max-height: 60vh; aspect-ratio: 16/9; }
+  /* Phase 15.1: same box as the video above so swapping between them
+     (enhancement on/off) doesn't visibly resize the modal - hidden by
+     default, shown only while the enhancement pipeline is running. */
+  .overlay-box canvas#enhanceCanvas { display: none; margin: 0 auto; background: #000; max-width: 100%; max-height: 60vh; aspect-ratio: 16/9; }
   .overlay-box .label { padding: 8px 12px; font-size: 14px; color: #ddd; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   /* Stacked vertically (name / status / latency), not inline — a
      narrow-viewport screenshot showed "Teras live" run together on one
@@ -52,7 +56,8 @@
     max-width: 100%; max-height: 100%; width: 100%; height: 100%;
     border: none; border-radius: 0;
   }
-  .overlay-box:fullscreen video, .overlay-box:-webkit-full-screen video {
+  .overlay-box:fullscreen video, .overlay-box:-webkit-full-screen video,
+  .overlay-box:fullscreen canvas#enhanceCanvas, .overlay-box:-webkit-full-screen canvas#enhanceCanvas {
     max-height: 100%;
   }
 
@@ -70,7 +75,7 @@
   @media (min-width: 700px) {
     .overlay-box { display: flex; flex-direction: row; }
     .overlay-video-col { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-    .overlay-box video { max-height: calc(100vh - 64px); max-width: 100%; width: auto; }
+    .overlay-box video, .overlay-box canvas#enhanceCanvas { max-height: calc(100vh - 64px); max-width: 100%; width: auto; }
     .overlay-side { width: 200px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow-y: auto; border-left: 1px solid #333; }
     .overlay-side .label { flex-direction: column; align-items: stretch; padding: 0; gap: 8px; }
     .overlay-side .label .actions { flex-direction: column; }
@@ -79,7 +84,7 @@
   @media (min-width: 700px) and (max-height: 500px) {
     .overlay { padding: 8px; }
     .overlay-box { max-height: calc(100vh - 16px); }
-    .overlay-box video { max-height: calc(100vh - 16px); }
+    .overlay-box video, .overlay-box canvas#enhanceCanvas { max-height: calc(100vh - 16px); }
     .overlay-side { width: 160px; padding: 8px; }
     .ptz { padding: 4px 0; }
   }
@@ -94,6 +99,14 @@
   <div class="overlay-box">
     <div class="overlay-video-col">
       <div id="overlaySlot"></div>
+      <!-- Phase 15.1: sibling of #overlaySlot, not a child of it - the
+           slot's own contents get replaced by whichever channel's <video>
+           is currently focused, and existing code (returnSlottedVideoHome)
+           looks up "the video inside the slot" directly, so this canvas
+           must live outside that lookup's reach. Hidden by default (CSS
+           below); shown in place of the (visually hidden, still decoding)
+           video only while enhancement is actually running. -->
+      <canvas id="enhanceCanvas"></canvas>
     </div>
     <div class="overlay-side">
       <div class="label">
@@ -105,6 +118,7 @@
             <button id="overlayPrev">◂ Prev</button>
             <button id="overlayNext">Next ▸</button>
           </div>
+          <button id="overlayEnhance">Enhance: Off</button>
           <button id="overlayFullscreen">Fullscreen ⛶</button>
           <button id="overlayClose">Close ✕</button>
         </div>
@@ -122,6 +136,11 @@
   </div>
 </div>
 
+<!-- After the overlay HTML, not in <head> like auth.js/hls.min.js -
+     enhance.js looks up #overlayEnhance/#enhanceCanvas at load time and
+     needs them to already exist, unlike auth.js which only ever builds
+     its own elements dynamically. -->
+<script src="/static/enhance.js"></script>
 <script>
 let overlayChannelId = null;
 
@@ -179,6 +198,10 @@ function restoreAllCells() {
   }
 }
 
+// Phase 15.1 classical enhancement lives in static/enhance.js (loaded
+// below) — applyEnhancement()/stopEnhancement() are its exported globals,
+// same pattern static/auth.js already uses for authFetch/ensureAuthKey.
+
 function openOverlay(cell, name, channelId, ptzEnabled) {
   const slot = document.getElementById('overlaySlot');
   const video = cell.querySelector('video');
@@ -194,6 +217,7 @@ function openOverlay(cell, name, channelId, ptzEnabled) {
   document.getElementById('overlay').classList.add('open');
   document.getElementById('ptzPad').classList.toggle('open', !!ptzEnabled);
   document.getElementById('ptzZoom').style.display = ptzEnabled ? 'flex' : 'none';
+  applyEnhancement(); // Phase 15.1 - targets whichever video is now in the slot
 }
 
 // PTZ is continuous-move: hold to move, release to stop (see
@@ -282,6 +306,10 @@ document.getElementById('overlayFullscreen').onclick = toggleFullscreen;
 
 function closeOverlay() {
   if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  // Phase 15.1 - before returnSlottedVideoHome(), so the video's inline
+  // display style (set by applyEnhancement() while enhancement was
+  // running) is cleared before it's reparented back into the grid cell.
+  stopEnhancement();
   returnSlottedVideoHome();
   restoreAllCells();
   ptzStop();
@@ -303,6 +331,10 @@ function showAdjacent(step) {
   if (currentIndex === -1) return;
   const next = cells[(currentIndex + step + cells.length) % cells.length];
   ptzStop();
+  // Phase 15.1 - same ordering reason as closeOverlay(): reset the
+  // outgoing video's display style before it goes back to the grid.
+  // openOverlay() re-applies enhancement to the incoming video itself.
+  stopEnhancement();
   returnSlottedVideoHome();
   openOverlay(next, next.dataset.name, Number(next.dataset.channelId), next.dataset.ptzEnabled === 'true');
 }
