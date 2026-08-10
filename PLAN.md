@@ -30,7 +30,7 @@ Rationale in `ARCHITECTURE.md`.
 | 11 | ✅ done | Detect a *lagging* stream (still connected, no fatal hls.js error, but frames have stopped advancing) as a status distinct from live/reconnecting/error. Design below. |
 | 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
-| 14 | 🟡 bug found | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism itself verified working against the real DVR (2026-08-10), but that same session found background cells get stuck showing `reconnecting…` indefinitely — fix planned, not yet implemented. Design below. |
+| 14 | ✅ done | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism, the `reconnecting…`-status bug found during verification, and a second stale-lag-timer bug found while re-verifying the fix are all fixed and confirmed against the real DVR (2026-08-10) — background cells held `live` across 5+ minutes/many duty cycles, Prev/Next handoff and modal close both restore correctly. Design below. |
 | 15 | ⬜ next | Client-side real-time video enhancement for the focused/modal stream only (WebGL2 shader pipeline; user-selectable mode, staged incrementally toward an optional ML mode). Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
@@ -545,28 +545,41 @@ one real bug found:**
   fine") — in practice it does the opposite, since `stopLoad()` itself
   is exactly what's prone to causing that first fatal error.
 
-**Fix plan (not yet implemented)**:
+**Fixed and re-verified against the real DVR (2026-08-10), in three commits
+— the first attempt turned out to be wrong and needed a second pass:**
 
-1. Guard the `Hls.Events.ERROR` handler the same way `armLagWatchdog`
-   and the `playing`/`timeupdate` handlers already are: if
-   `backgrounded` is true, skip `setStatus(...)` entirely (still fine
-   to let `hls`'s own internal recovery — `startLoad()`/
-   `recoverMediaError()` — run, or even just no-op and let the next
-   scheduled `bgOn()` in `scheduleBgCycle()` re-`startLoad()` instead,
-   avoiding two independent callers racing `stopLoad()`/`startLoad()`
-   on the same `hls` instance).
-2. On `restoreForeground()`, explicitly reassert whatever the true
-   current state is (probe `video.paused`/an immediate `startLoad()` +
-   `play()` and let the next real `playing`/`timeupdate` event correct
-   the label) rather than assuming the label is already right — a
-   belt-and-suspenders reset in case any fatal-error label leaked
-   through despite fix #1.
-3. Re-verify against the real DVR the same way this round did: open a
-   modal, leave it open several minutes (long enough to cross several
-   duty cycles, since the bug didn't appear on the first cycle), and
-   confirm background cells' status stays `live`-or-silent rather than
-   drifting to `reconnecting…` while their `currentTime` is
-   independently confirmed still advancing.
+1. Guarded the `Hls.Events.ERROR` handler so a fatal error while
+   `backgrounded` doesn't call `setStatus(...)`. **First attempt made it
+   a full no-op instead** (skipped `startLoad()`/`recoverMediaError()`/
+   rebuild too, not just the label) — re-verifying that version found it
+   left `hls`'s underlying `MediaSource` permanently stuck after enough
+   duty-cycle churn (`currentTime` frozen, unresponsive even to a manual
+   `restoreForeground()` call), which is worse than a wrong label. Fixed
+   by keeping the exact same tiered recovery (`startLoad()` →
+   `recoverMediaError()` → full rebuild) unconditionally, and only
+   wrapping the `setStatus(...)` calls (in the handler itself,
+   `scheduleRestart()`, and the Safari-native fallback's `error`
+   listener) in `if (!backgrounded)`. A rebuild triggered while
+   backgrounded now also immediately re-`bgOff()`s so it doesn't blast
+   at full speed until the next scheduled duty-cycle boundary.
+2. `restoreForeground()` now explicitly calls `setStatus('live', 'ok')`
+   + `armLagWatchdog()` right after `bgOn()`, instead of waiting for the
+   next `playing`/`timeupdate` event — belt-and-suspenders against any
+   stale label.
+3. **Second bug found while re-verifying fix #1**: `throttleBackground()`
+   never cancelled an already-in-flight lag-watchdog timer — one armed
+   moments before backgrounding began would still fire mid-throttle,
+   setting `lagging…` and then, 15s later, tearing down and rebuilding
+   `hls` entirely for a stream that was only ever intentionally paused.
+   Fixed by adding `clearLagTimers()` to `throttleBackground()`, the same
+   cancellation the `visibilitychange`-hidden branch already did for the
+   identical reason.
+4. Re-verified end to end: modal left open 5+ minutes / many duty
+   cycles, all five background cells held `live` throughout with
+   `currentTime` independently confirmed still advancing each burst (no
+   recurrence of the stuck-`reconnecting…` or frozen-`MediaSource`
+   failure modes); Prev/Next handoff and modal close both restored
+   every cell correctly.
 
 ## Phase 15 design: client-side real-time stream enhancement (focused stream only, staged toward ML)
 
