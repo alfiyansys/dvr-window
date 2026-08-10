@@ -357,7 +357,10 @@ function setupHlsPlayer(video, status, hlsUrl) {
   }
 
   function scheduleRestart() {
-    setStatus('reconnecting…', 'loading');
+    // Phase 14: don't relabel an intentionally-throttled cell as broken -
+    // see the Hls.Events.ERROR handler in start() for why this can fire
+    // while backgrounded at all.
+    if (!backgrounded) setStatus('reconnecting…', 'loading');
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
       retryMs = Math.min(retryMs * 2, RETRY_MS_MAX);
@@ -557,36 +560,41 @@ function setupHlsPlayer(video, status, hlsUrl) {
       hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
+      // Phase 14: a rebuild triggered while backgrounded (from the
+      // ERROR handler below, or scheduleRestart() via the lag watchdog)
+      // would otherwise start loading/playing at full speed until the
+      // next scheduled duty-cycle boundary - immediately re-pause to
+      // match whatever phase the duty cycle is currently in instead.
+      if (backgrounded) bgOff();
       hls.on(Hls.Events.MANIFEST_PARSED, () => { retryMs = RETRY_MS_INITIAL; consecutiveErrors = 0; });
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
         clearLagTimers();
         // Phase 14's own stopLoad()/startLoad() duty-cycling can itself
         // trigger a fatal error here (confirmed against the real DVR:
-        // mediamtx tearing down the muxer/on-demand source mid-off-phase)
-        // - not a real failure to report or recover from ourselves.
-        // scheduleBgCycle()'s own bgOn() already re-calls startLoad() on
-        // its own schedule, so let it own recovery instead of racing it
-        // here, and don't touch the status label either - same reasoning
-        // as the backgrounded guard on the playing/timeupdate handlers
-        // below. Reset consecutiveErrors so throttle-induced churn never
-        // pre-counts against a genuine error noticed after restoreForeground().
-        if (backgrounded) {
-          consecutiveErrors = 0;
-          return;
-        }
+        // mediamtx tearing down the muxer/on-demand source mid-off-phase).
+        // That's not something to alarm the user about - see the
+        // backgrounded guard on the playing/timeupdate handlers below for
+        // the same reasoning - but it still needs the same real recovery
+        // action below. An earlier version of this fix no-op'd entirely
+        // while backgrounded instead of just suppressing the label; that
+        // was wrong - confirmed against the real DVR that repeated fatal
+        // errors with zero recovery attempts eventually leaves hls's
+        // underlying MediaSource permanently stuck, which is worse than a
+        // wrong status label. So: always recover, just skip the label
+        // while backgrounded.
         consecutiveErrors++;
         if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          setStatus('reconnecting…', 'loading');
+          if (!backgrounded) setStatus('reconnecting…', 'loading');
           hls.startLoad();
           return;
         }
         if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          setStatus('reconnecting…', 'loading');
+          if (!backgrounded) setStatus('reconnecting…', 'loading');
           hls.recoverMediaError();
           return;
         }
-        setStatus('error', 'err');
+        if (!backgrounded) setStatus('error', 'err');
         hls.destroy();
         hls = null;
         scheduleRestart();
@@ -672,7 +680,9 @@ function setupHlsPlayer(video, status, hlsUrl) {
     video.addEventListener('loadedmetadata', () => { retryMs = RETRY_MS_INITIAL; });
     video.addEventListener('error', () => {
       clearLagTimers();
-      setStatus('error', 'err');
+      // Same reasoning as the hls.js ERROR handler in start() - don't
+      // relabel an intentionally-throttled cell as broken.
+      if (!backgrounded) setStatus('error', 'err');
       scheduleRestart();
     });
   }
