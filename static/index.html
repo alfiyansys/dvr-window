@@ -506,6 +506,15 @@ function setupHlsPlayer(video, status, hlsUrl) {
     backgrounded = false;
     clearBgTimers();
     bgOn();
+    // Belt-and-suspenders against a stale reconnecting…/error label
+    // leaking through despite the Hls.Events.ERROR guard above - reassert
+    // live and restart the watchdog immediately rather than waiting on
+    // the next playing/timeupdate event to correct it. Harmless if the
+    // stream was already fine (the next real event just confirms it
+    // again); a genuinely broken stream still gets caught quickly by the
+    // now-unguarded (backgrounded is false again) watchdog/error paths.
+    setStatus('live', 'ok');
+    armLagWatchdog();
   }
 
   function armLagWatchdog() {
