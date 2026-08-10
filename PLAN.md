@@ -714,6 +714,24 @@ hardware, not just reasoned about):
   the newly-focused channel's video with no stale frame or leaked
   WebGL context from the previous one.
 
+**Status (2026-08-10): implemented, not fully verified — none of the
+four items above are confirmed yet.** What has been confirmed so far:
+the pipeline runs and renders correctly (including the vertical-flip
+fix caught by the user testing it directly), the `Off`/`Classical`
+toggle works and persists across reloads, and no console errors or
+regressions from the `enhance.js`/CSS extraction. A same-day attempt to
+work through the four checklist items above was blocked by real host
+resource contention (system briefly had well under 1GB free RAM, load
+average 7+) making the browser-automation tab crash repeatedly and
+streams take minutes to connect instead of seconds — confirmed
+server-side (mediamtx paths/ffmpeg) stayed healthy throughout, so this
+was purely local resource pressure, not a code issue. Freeing memory
+partially helped but didn't fully resolve it within the session.
+Resume the checklist once the environment is stable; the dark-feed
+comparison in particular still needs a genuinely dark/IR-lit real feed
+(e.g. `IPCamera 02`, which showed IR-green tinting in earlier
+screenshots) rather than the daytime footage tested so far.
+
 ## Phase 15.2 design: ML groundwork for stream enhancement (dev-only, not yet user-facing)
 
 Staged separately from 15.3 so nothing downstream (a public `AI`
