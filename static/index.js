@@ -238,6 +238,11 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // work) escalates to a full instance rebuild, which does re-fetch the
   // manifest from scratch.
   let consecutiveErrors = 0;
+  // Set instead of immediately rebuilding when a fatal error escalates
+  // past the cheap in-place fixes while backgrounded — see the
+  // Hls.Events.ERROR handler in start() for why the rebuild itself has
+  // to wait for restoreForeground() rather than running right away.
+  let pendingRebuild = false;
 
   function setStatus(text, cls) {
     status.textContent = text;
@@ -407,7 +412,17 @@ function setupHlsPlayer(video, status, hlsUrl) {
     if (!backgrounded) return;
     backgrounded = false;
     clearBgTimers();
-    bgOn();
+    if (pendingRebuild) {
+      // A fatal error escalated past the cheap in-place fixes while this
+      // cell was backgrounded (see the ERROR handler in start()) - do the
+      // actual rebuild now, right as the cell is about to be looked at
+      // again, instead of however many duty cycles ago it first failed.
+      pendingRebuild = false;
+      consecutiveErrors = 0;
+      start();
+    } else {
+      bgOn();
+    }
     // Belt-and-suspenders against a stale reconnecting…/error label
     // leaking through despite the Hls.Events.ERROR guard above - reassert
     // live and restart the watchdog immediately rather than waiting on
@@ -463,14 +478,15 @@ function setupHlsPlayer(video, status, hlsUrl) {
         // mediamtx tearing down the muxer/on-demand source mid-off-phase).
         // That's not something to alarm the user about - see the
         // backgrounded guard on the playing/timeupdate handlers below for
-        // the same reasoning - but it still needs the same real recovery
-        // action below. An earlier version of this fix no-op'd entirely
-        // while backgrounded instead of just suppressing the label; that
-        // was wrong - confirmed against the real DVR that repeated fatal
-        // errors with zero recovery attempts eventually leaves hls's
-        // underlying MediaSource permanently stuck, which is worse than a
-        // wrong status label. So: always recover, just skip the label
-        // while backgrounded.
+        // the same reasoning - but the cheap in-place fixes below still
+        // need to run regardless of backgrounded. An earlier version of
+        // this fix no-op'd entirely while backgrounded instead of just
+        // suppressing the label; that was wrong - confirmed against the
+        // real DVR that repeated fatal errors with zero recovery attempts
+        // eventually leaves hls's underlying MediaSource permanently
+        // stuck, which is worse than a wrong status label. So: always run
+        // startLoad()/recoverMediaError(), just skip the label while
+        // backgrounded.
         consecutiveErrors++;
         if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           if (!backgrounded) setStatus('reconnecting…', 'loading');
@@ -482,7 +498,26 @@ function setupHlsPlayer(video, status, hlsUrl) {
           hls.recoverMediaError();
           return;
         }
-        if (!backgrounded) setStatus('error', 'err');
+        // Escalating past here means a full rebuild: destroy the current
+        // hls instance and attachMedia() a fresh one, which blanks the
+        // video to black until the new instance has buffered enough to
+        // render again (a fresh MediaSource starts with zero data,
+        // unlike startLoad()/recoverMediaError() above which keep the
+        // existing one). Reported by the user in real use: background
+        // cells going visibly black during a modal session, still black
+        // for a moment after closing it - matches doing this rebuild
+        // immediately while backgrounded, since a freshly-rebuilt
+        // instance only gets BG_ON_MS (2s) per duty cycle to load
+        // anything before being paused again, often not enough for even
+        // one frame to render. Nobody's watching a backgrounded cell
+        // anyway, so defer the actual rebuild to restoreForeground()
+        // instead - the stale instance just sits there showing its last
+        // good frame (frozen, not black) until then.
+        if (backgrounded) {
+          pendingRebuild = true;
+          return;
+        }
+        setStatus('error', 'err');
         hls.destroy();
         hls = null;
         scheduleRestart();
@@ -568,9 +603,16 @@ function setupHlsPlayer(video, status, hlsUrl) {
     video.addEventListener('loadedmetadata', () => { retryMs = RETRY_MS_INITIAL; });
     video.addEventListener('error', () => {
       clearLagTimers();
-      // Same reasoning as the hls.js ERROR handler in start() - don't
-      // relabel an intentionally-throttled cell as broken.
-      if (!backgrounded) setStatus('error', 'err');
+      // Same reasoning as the hls.js ERROR handler in start() - reassigning
+      // video.src (what a restart ultimately does on this path) blanks the
+      // video until it reloads, so defer it to restoreForeground() while
+      // backgrounded instead of leaving the cell visibly black in the
+      // meantime for however long it takes to reconnect.
+      if (backgrounded) {
+        pendingRebuild = true;
+        return;
+      }
+      setStatus('error', 'err');
       scheduleRestart();
     });
   }
