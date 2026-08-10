@@ -26,10 +26,12 @@ SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "tmp" / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-async def _gc_playback_paths_loop(bridge: MediaBridge) -> None:
+async def _reconcile_paths_loop(bridge: MediaBridge) -> None:
     while True:
         await asyncio.sleep(30)
-        removed = await asyncio.to_thread(bridge.gc_playback_paths)
+        recovered, removed = await asyncio.to_thread(bridge.reconcile_paths)
+        for name in recovered:
+            print(f"[reconcile] re-registered missing live-view path: {name}")
         for name in removed:
             print(f"[gc] removed abandoned playback path: {name}")
 
@@ -46,7 +48,7 @@ async def lifespan(app: FastAPI):
     bridge.start(settings.device, channels)
     app.state.bridge = bridge
 
-    gc_task = asyncio.create_task(_gc_playback_paths_loop(bridge))
+    gc_task = asyncio.create_task(_reconcile_paths_loop(bridge))
 
     try:
         yield
