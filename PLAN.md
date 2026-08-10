@@ -30,6 +30,9 @@ Rationale in `ARCHITECTURE.md`.
 | 11 | ✅ done | Detect a *lagging* stream (still connected, no fatal hls.js error, but frames have stopped advancing) as a status distinct from live/reconnecting/error. Design below. |
 | 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
+| 14 | ✅ done | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism, the `reconnecting…`-status bug found during verification, and a second stale-lag-timer bug found while re-verifying the fix are all fixed and confirmed against the real DVR (2026-08-10) — background cells held `live` across 5+ minutes/many duty cycles, Prev/Next handoff and modal close both restore correctly. Design below. |
+| 15 | ⬜ next | Client-side real-time video enhancement for the focused/modal stream only (WebGL2 shader pipeline; user-selectable mode, staged incrementally toward an optional ML mode). Design below. |
+| 16 | ⬜ next | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which today requires a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -285,8 +288,11 @@ service", not duplicated here.
 Still open, unrelated to the split itself: re-checking each
 container's memory limit against real peak usage (the original `384M`
 guess was for both processes conflated together; splitting at least
-makes this measurable per-service now) and surfacing a log line if
-mediamtx ever exits unexpectedly.
+makes this measurable per-service now) — done, see "Memory/CPU limit
+re-check (Phase 6)" in `ARCHITECTURE.md` — and the path-loss gap itself
+(Phase 16 design below), which is the sharper version of "surfacing a
+log line if mediamtx ever exits unexpectedly": logging alone wouldn't
+have prevented the 2026-08-10 incident, only reconciliation would.
 
 ## Phase 12 design: fix silent live-view drift (advancing but stale)
 
@@ -409,6 +415,381 @@ cells showed a live-updating `Xms` next to their status badge; all 4
 analog cells showed nothing. No console errors across multiple poll
 cycles.
 
+## Phase 14 design: prioritize focused-camera stream speed (background throttling)
+
+**Problem**: all 6 grid cells (`static/index.html`, `main()`) run their own
+continuous `hls.js` instance all the time, even while the detail modal
+(`openOverlay`) is open showing just one of them full-size.
+`openOverlay` doesn't create a second player for the focused stream —
+it relocates the *same* `<video>`/`hls` instance the grid cell already
+owns into `#overlaySlot` (`slot.appendChild(video)`), so the focused
+stream was never actually a separate, prioritizable thing from the
+grid cell's own player. What competes with it is the other 5 cells'
+players, still pulling segments continuously the whole time the modal
+is open — client network/decode contention, and, for channels 9/10,
+contention on the already-strained multi-hop wireless link back to the
+DVR documented elsewhere in this file (see Phase 11/13 designs).
+
+**Approach: throttle, not pause**, the non-focused cells while a modal
+is open — duty-cycle their `hls.js` loading instead of stopping it
+outright, so grid thumbnails stay semi-live instead of freezing on the
+last frame, while cutting their steady-state bandwidth/CPU draw
+sharply.
+
+- New per-player controls on the object `setupHlsPlayer` already owns
+  (`hls`, `video`) — `throttleBackground()` / `restoreForeground()`,
+  called from `openOverlay`/`closeOverlay`/`showAdjacent` rather than
+  duplicating hls.js lifecycle logic outside `setupHlsPlayer`.
+- `throttleBackground()`: `hls.stopLoad()` + `video.pause()`
+  immediately (stop new segment fetches, stop decode of whatever's
+  already buffered), then a repeating timer — every `BG_OFF_MS`
+  (10s), `startLoad()` + `play()` for `BG_ON_MS` (2s) to pull a fresh
+  segment or two, then `stopLoad()` + `pause()` again. A ~20% duty
+  cycle: enough to keep a thumbnail visibly current, far less constant
+  draw than today's every-cell-always-on baseline. Exact numbers to be
+  tuned against real measurements, not treated as final here.
+- `restoreForeground()`: clear the duty-cycle timer, `startLoad()` +
+  `play()`, back to normal continuous playback.
+- Wiring: `openOverlay(cell, ...)` throttles every other `.cell`'s
+  player; `closeOverlay()` restores all of them; `showAdjacent(step)`
+  (Prev/Next) throttles the cell being left and restores the one being
+  entered directly, instead of restoring everything then re-throttling
+  — avoids a needless full-bandwidth blip on the outgoing cell mid-transition.
+- **Must suppress the Phase 11/12 watchdogs while throttled** —
+  `armLagWatchdog`/`checkDrift`/the `timeupdate` handler already exist
+  specifically to detect and escalate a stalled stream, and the
+  duty-cycle's "off" phase is a deliberate stall by that same
+  definition. Without a guard, a throttled background cell would trip
+  its own lag/drift detection and escalate into a full rebuild every
+  duty cycle, defeating the point. Add a `backgrounded` flag on the
+  player, checked the same way `document.visibilityState !== 'visible'`
+  already gates `armLagWatchdog` — set on `throttleBackground()`,
+  cleared on `restoreForeground()`.
+- **Status label while throttled**: leave whatever the cell's
+  `.status` last said (almost always `live`) rather than fabricating a
+  new state — the stream genuinely is fine, just deliberately
+  deprioritized by this app, not by anything wrong with it.
+
+**Open risk to check before calling this done — channel 10's
+on-demand transcode**: `ch10_main`'s path uses mediamtx's
+`runOnDemand` hook to spawn the H.265→H.264 `ffmpeg` transcode only
+while a client is actually reading the path (`ARCHITECTURE.md`,
+"H.265→H.264 transcode for main streams"). If `hls.stopLoad()`
+actually drops the browser's underlying HTTP connection to mediamtx
+(not just pauses hls.js's own segment processing while a request stays
+open), mediamtx may see zero active readers during every "off" phase
+and tear the transcode down — meaning every `BG_ON_MS` burst pays a
+fresh `ffmpeg` spin-up (already confirmed elsewhere to take a couple
+of seconds) instead of resuming an already-warm stream, actively worse
+than not throttling that one channel at all. Needs checking against
+the real DVR (mediamtx's own logs, per this project's usual
+verification standard) before shipping; if confirmed, channel 10
+likely needs a longer, less frequent duty cycle (or exemption from
+throttling entirely) rather than sharing the other channels' constants.
+
+**Verification plan** (per `AGENTS.md` — against the real DVR, not
+just reasoned about):
+
+- Open the modal for one channel, confirm the other 5 cells'
+  thumbnails keep updating roughly every `BG_OFF_MS` instead of
+  freezing, and confirm (browser Network tab / `docker stats`) that
+  segment-request volume and CPU from the throttled cells drop
+  sharply.
+- Confirm the focused stream doesn't regress — same live/lagging/error
+  behavior as before this change, ideally recovering faster / staying
+  steadier once the other 5 aren't competing for bandwidth, checked
+  specifically on the wireless-hop channels (9/10) where contention
+  would show up first.
+- Confirm `showAdjacent` (Prev/Next) correctly hands throttling off
+  the outgoing cell and onto the incoming one, with no cell left
+  fully throttled after `closeOverlay()`.
+- Confirm channel 10 specifically (the transcode risk above) — check
+  mediamtx's logs for repeated `ffmpeg` spin-up/teardown during a
+  modal session, not just that the picture looks fine.
+
+**Verified against the real DVR (2026-08-10) — confirmed working, plus
+one real bug found:**
+
+- **Working as designed**: duty-cycle timing matches spec exactly —
+  sampled `video.paused`/`currentTime` directly (not just read the
+  code) on both a normal background cell and channel 10, both showed
+  the expected ~10s-paused / ~2s-resumed-and-advancing pattern. The
+  focused cell (`Teras`) kept advancing continuously and unthrottled
+  throughout. `closeOverlay()` correctly restored all 5 background
+  cells back to `live`.
+- **Bug found — throttled cells get stuck on "reconnecting…"
+  indefinitely, not just channel 10**: after a few minutes with a
+  modal open, *all five* background cells (not only the wireless-hop
+  9/10 ones) ended up permanently showing `reconnecting…` in the
+  status badge, even though their video was demonstrably still alive
+  and advancing every `BG_ON_MS` burst (confirmed via direct
+  `currentTime` sampling — the picture itself was fine, only the label
+  was wrong). Root cause, traced through both the code and mediamtx's
+  own log:
+  1. `bgOff()`'s `hls.stopLoad()` can itself trigger a fatal `hls.js`
+     `NETWORK_ERROR` — mediamtx's log showed a muxer/on-demand-source
+     teardown (`[muxer ch9_main] destroyed: muxer error...` →
+     `[RTSP source] stopped: not needed by anyone`) lining up exactly
+     with an off-cycle.
+  2. The `Hls.Events.ERROR` handler (`static/index.html:541-559`) has
+     **no `backgrounded` guard** — unlike the Phase 11/12 watchdogs and
+     the `playing`/`timeupdate` handlers, which this phase's design
+     *did* remember to guard (see the bullet above). So the fatal
+     error unconditionally calls `setStatus('reconnecting…', ...)`.
+  3. There is then **no path back to `live`** while still
+     backgrounded: the only code that reasserts `live` (the
+     `playing`/`timeupdate` handlers) explicitly `return`s early
+     whenever `backgrounded` is true (by design, to avoid relabeling a
+     deliberate pause as broken) — so once the error handler sets
+     `reconnecting…`, nothing clears it until `restoreForeground()`
+     runs at modal-close.
+  
+  This directly contradicts this phase's own stated goal ("leave
+  whatever the cell's `.status` last said... the stream genuinely is
+  fine") — in practice it does the opposite, since `stopLoad()` itself
+  is exactly what's prone to causing that first fatal error.
+
+**Fixed and re-verified against the real DVR (2026-08-10), in three commits
+— the first attempt turned out to be wrong and needed a second pass:**
+
+1. Guarded the `Hls.Events.ERROR` handler so a fatal error while
+   `backgrounded` doesn't call `setStatus(...)`. **First attempt made it
+   a full no-op instead** (skipped `startLoad()`/`recoverMediaError()`/
+   rebuild too, not just the label) — re-verifying that version found it
+   left `hls`'s underlying `MediaSource` permanently stuck after enough
+   duty-cycle churn (`currentTime` frozen, unresponsive even to a manual
+   `restoreForeground()` call), which is worse than a wrong label. Fixed
+   by keeping the exact same tiered recovery (`startLoad()` →
+   `recoverMediaError()` → full rebuild) unconditionally, and only
+   wrapping the `setStatus(...)` calls (in the handler itself,
+   `scheduleRestart()`, and the Safari-native fallback's `error`
+   listener) in `if (!backgrounded)`. A rebuild triggered while
+   backgrounded now also immediately re-`bgOff()`s so it doesn't blast
+   at full speed until the next scheduled duty-cycle boundary.
+2. `restoreForeground()` now explicitly calls `setStatus('live', 'ok')`
+   + `armLagWatchdog()` right after `bgOn()`, instead of waiting for the
+   next `playing`/`timeupdate` event — belt-and-suspenders against any
+   stale label.
+3. **Second bug found while re-verifying fix #1**: `throttleBackground()`
+   never cancelled an already-in-flight lag-watchdog timer — one armed
+   moments before backgrounding began would still fire mid-throttle,
+   setting `lagging…` and then, 15s later, tearing down and rebuilding
+   `hls` entirely for a stream that was only ever intentionally paused.
+   Fixed by adding `clearLagTimers()` to `throttleBackground()`, the same
+   cancellation the `visibilitychange`-hidden branch already did for the
+   identical reason.
+4. Re-verified end to end: modal left open 5+ minutes / many duty
+   cycles, all five background cells held `live` throughout with
+   `currentTime` independently confirmed still advancing each burst (no
+   recurrence of the stuck-`reconnecting…` or frozen-`MediaSource`
+   failure modes); Prev/Next handoff and modal close both restored
+   every cell correctly.
+
+## Phase 15 design: client-side real-time stream enhancement (focused stream only, staged toward ML)
+
+Builds directly on Phase 14: once the focused camera's stream is the
+one getting priority bandwidth/CPU while its modal is open, that same
+single stream is also the only one where spending client GPU/CPU on
+*enhancing* the picture (not just delivering it faster) is affordable.
+Applying this to all 6 grid cells at once would compete with the exact
+resource contention Phase 14 exists to relieve — so this is explicitly
+scoped to the one `<video>` currently sitting in `#overlaySlot`, never
+the grid.
+
+**Architecture — one pipeline, pluggable processors, so "which method"
+is a config choice, not a rewrite:**
+
+- `openOverlay()` creates a WebGL2 `<canvas>` sized to match the
+  `<video>` and stacks it directly over it in `#overlaySlot`; the
+  `<video>` itself stays in the DOM and keeps decoding (it's the frame
+  source) but becomes visually hidden, canvas shows the processed
+  output. `closeOverlay()` and `showAdjacent()` tear the canvas down /
+  recreate it against the new channel's video the same way Phase 14
+  already re-targets `throttleBackground`/`restoreForeground` per cell
+  — the two features share the modal's open/close/switch lifecycle
+  hooks but don't otherwise interact (enhancement only ever touches
+  whichever cell is currently *not* throttled).
+- Frame feed via `video.requestVideoFrameCallback` (falls back to
+  skipping enhancement entirely, not to a `requestAnimationFrame`
+  polling loop, if unsupported — see fallback policy below) — fires
+  once per actually-decoded frame, texture-uploads straight from the
+  `<video>` element (`texImage2D` accepts a video element directly, no
+  intermediate 2D-canvas copy needed).
+- A small `EnhancementPipeline` abstraction: takes the uploaded frame
+  texture, runs whichever **processor** is currently selected
+  (`off` / `classical` / later `ml`), writes to the visible canvas.
+  Processors are swappable behind this one interface specifically so
+  the incremental stages below (classical now, ML later) don't require
+  redoing the canvas/texture/lifecycle plumbing — only a new processor
+  gets added each time.
+
+**Method selector — user picks, not auto-decided:**
+
+- A control in `.overlay-side` (alongside Snapshot/Playback/Fullscreen)
+  cycling `Off` (default) / `Classical` — `AI` is added to this same
+  list only once the ML stage below actually ships, not built as a
+  disabled placeholder now (a "coming soon" option that does nothing
+  is worse than no option). Choice persists in `localStorage`
+  (`enhanceMode`, same pattern `static/auth.js` already uses for the
+  auth key) — one global preference applied to whichever camera is
+  currently focused, not remembered per-channel; simplest thing that
+  works, revisit only if real usage shows people want different modes
+  per camera (e.g. always-classical on the noisy IR channels, off on
+  the already-sharp ones).
+- `off` is a true passthrough (canvas layer not even created) — zero
+  overhead for anyone who doesn't want this, and the default for
+  everyone until they opt in.
+
+**Classical processor (this phase's actual deliverable) — two cheap
+single-pass shaders:**
+
+- **Auto-levels / gamma boost**: stretches the frame's black/white
+  point and applies a configurable gamma lift — targets this DVR's
+  dark analog/IR-night footage specifically (real examples already
+  documented elsewhere in this file: the wireless IP-proxy channels
+  and channel 10's transcoded feed).
+- **Unsharp mask**: a small-radius blur subtracted back from the
+  original to boost edge contrast — targets the softness the
+  H.265→H.264 transcode on channel 10 already introduces (`ARCHITECTURE.md`,
+  "H.265→H.264 transcode for main streams").
+- Both run as one combined WebGL2 fragment shader pass (not two
+  separate render targets) — a single 1080p pass is comfortably 60fps
+  on modest client hardware, so this is not a performance concern for
+  one stream; keeping it one pass avoids the extra framebuffer
+  ping-pong two separate passes would need.
+
+**Fallback policy — enhancement is always optional, never
+load-bearing**, matching this codebase's existing pattern for
+non-critical browser-capability gaps (the Safari-native-HLS path
+already accepts not being able to attach auth headers rather than
+blocking playback): no WebGL2, no `requestVideoFrameCallback`, or any
+runtime error inside a processor all fall back to plain unenhanced
+`<video>` — never to a broken or blank picture, and never by retrying
+in a loop.
+
+**Incremental roadmap toward ML — staged so nothing downstream is
+built before the stage that justifies it is proven:**
+
+- **15.1 (this round's scope)** — the pipeline/canvas/lifecycle
+  plumbing above, the mode selector (`Off`/`Classical` only), and the
+  classical processor. Ships alone as a complete, useful feature —
+  intentionally not blocked on any ML work below.
+- **15.2 — ML groundwork, not yet user-facing**: pick a lightweight
+  browser-capable model (a small super-resolution net like ESPCN/FSRCNN,
+  or a denoise-focused one — final pick needs benchmarking against
+  real footage from this DVR, not assumed) and a runtime
+  (TensorFlow.js or ONNX Runtime Web, WebGL/WebGPU backend). Whatever
+  is chosen must be **vendored locally** (`static/vendor/`,
+  gitignored-model-weights-or-not decided at that time) per `AGENTS.md`'s
+  existing no-CDN-dependency rule for frontend deps — the model weights
+  themselves only fetched lazily when a user actually selects `AI`
+  mode later, never on page load, so nobody pays that download for a
+  feature they never turn on. This stage lands the `ml` processor
+  behind a dev-only flag, not in the public selector yet, so real FPS/
+  quality can be measured against this DVR's actual streams before
+  committing to ship it.
+- **15.3 — `AI` becomes a real selector option**, gated by a runtime
+  capability/performance check (e.g. a brief benchmark pass on
+  pipeline init) that auto-falls-back to `Classical` if the device
+  can't sustain acceptable frame rate — the same "always have an
+  accepted fallback" policy as WebGL2-unavailable above, applied to
+  "WebGL2 exists but this device's GPU is too weak for the ML pass
+  specifically." Requires real-device verification (per `AGENTS.md`)
+  on more than one client, not just the dev machine, before this stage
+  is considered done — ML inference cost varies far more by hardware
+  than the classical shader pass does.
+- **15.4 (explicit non-goal until 15.1-15.3 are proven)** — per-camera
+  default modes, auto-switching heuristics (e.g. auto-`Classical` on
+  known-dark channels), or any server-side involvement. Not speced
+  further here; premature ahead of real usage data from the earlier
+  stages.
+
+**Verification plan** (per `AGENTS.md` — real DVR and real client
+hardware, not just reasoned about):
+
+- Confirm the classical pass visibly improves at least one genuinely
+  dark/soft real feed from this DVR (before/after screenshots), not
+  just that the shader compiles.
+- Confirm zero measurable impact on the grid's other 5 cells or
+  Phase 14's throttling behavior while enhancement runs in the modal.
+- Confirm the selector persists across a page reload and correctly
+  falls back to plain `<video>` when WebGL2/`requestVideoFrameCallback`
+  is unavailable (test via a real capability gap, not just reading the
+  code).
+- Confirm Prev/Next (`showAdjacent`) correctly re-targets the canvas to
+  the newly-focused channel's video with no stale frame or leaked
+  WebGL context from the previous one.
+- (15.2/15.3 only, once reached) confirm the ML processor's vendored
+  weights load with no network calls beyond this LAN/the local
+  service, and that the perf-fallback genuinely engages on a
+  deliberately underpowered test client.
+
+## Phase 16 design: self-heal mediamtx live-view paths after an independent restart
+
+**Problem**, already named as a known gap when mediamtx was split into
+its own Swarm service (`ARCHITECTURE.md`, "Known gap: mediamtx
+restarting alone loses live-view paths"): `MediaBridge.start()` pushes
+every `ch{id}_main/sub` path into mediamtx exactly once, at
+`dvr-window`'s *own* startup. If `mediamtx` restarts on its own —
+OOM-kill, crash, a redeploy of just that service — the fresh instance
+comes up with zero paths registered, and stays that way (every HLS/
+WebRTC request for a channel fails) until `dvr-window` itself also
+restarts. Deferred at the time as out of scope for that round.
+
+**Confirmed as a real, not theoretical, production gap (2026-08-10)**:
+`mediamtx` on `sm-qohelet`/`sw-david01` was OOM-killed (exit 137) under
+a stale `384M`/`1.0` CPU limit that had drifted out of sync with the
+repo's already-updated `768M`/`1.5` CPU recommendation (a separate
+config-drift issue, fixed by redeploying the corrected limits — see
+"Memory/CPU limit re-check (Phase 6)" in `ARCHITECTURE.md`). That
+alone reduces how *often* mediamtx gets OOM-killed, but does nothing
+for what happens the next time it restarts for any reason: live view
+read as an endless client-side reconnect loop until a manual `docker
+service update --force dvr-window_dvr-window` re-pushed the paths.
+
+**Approach**: extend the existing playback-path GC sweep
+(`MediaBridge`, Phase 6 — already polls mediamtx's own `GET /v3/paths/
+list` every 30s to garbage-collect abandoned playback paths) to also
+verify the live-view paths are present, rather than adding a second
+polling loop:
+
+- On each 30s sweep, check that every expected `ch{id}_main/sub` name
+  appears in the same `paths/list` response already being fetched for
+  GC.
+- Any missing → re-push via the same idempotent `POST /v3/config/
+  paths/replace/{name}` `_add_path` already uses at startup (confirmed
+  safe to call repeatedly — that's the whole reason `replace` was
+  chosen over `add` originally, see "Path registration is idempotent"
+  in `ARCHITECTURE.md`).
+- Bounds recovery time to one GC cycle (≤30s) after mediamtx comes
+  back, instead of indefinitely until someone notices and manually
+  restarts `dvr-window` — closing the gap without reimplementing
+  mediamtx's own crash-restart (Swarm's `restart_policy` already
+  handles that part fine, per the Phase 6 design above).
+- Log a line when a re-push actually happens (missing paths found and
+  restored) — the original "surfacing a log line" idea from the Phase
+  6 design, but attached to the moment that matters (paths were
+  actually gone) rather than to mediamtx's exit event itself, which
+  `dvr-window` has no direct visibility into anyway (they're separate
+  containers).
+
+**Open question to resolve before implementing**: whether to
+distinguish "mediamtx restarted and lost paths" from "mediamtx is
+still starting up and hasn't been pushed to yet" (e.g. right after a
+fresh `docker stack deploy` of both services together, before
+`dvr-window`'s own startup push has run) — the reconciliation sweep
+firing during that brief legitimate window should just push paths
+early/harmlessly, not log a spurious "recovered from a gap" line.
+
+**Verification plan** (per `AGENTS.md` — against the real DVR, not
+just reasoned about): simulate the real incident directly — kill the
+`mediamtx` container while `dvr-window` keeps running (matches how
+this was found originally, per the Phase 6 design's "Known gap"
+discovery), confirm live view is broken immediately after, then
+confirm it self-recovers within one GC cycle with no manual
+intervention, and confirm the new log line appears exactly once per
+genuine recovery, not on every sweep.
+
 ## Non-goals (for now)
 
 - Two-way audio talk-back.
@@ -422,7 +803,15 @@ cycles.
 
 ## Next step
 
-Playback-path GC and the memory/CPU limit re-check are done (see
-"Phase 6 design" above). Event/alarm stream is blocked on DVR account
-privilege and config, not code — revisit if that changes. No other
-Phase 6 items are currently open.
+Phase 14 (prioritize focused-camera stream speed via background
+throttling — design above) is next up for implementation, followed by
+Phase 15's first stage (15.1: client-side classical enhancement for
+the focused stream, with the ML stages 15.2-15.4 staged for later —
+design above). Phase 16 (self-heal mediamtx live-view paths after an
+independent restart — design above) was added 2026-08-10 after a real
+production incident and should be prioritized alongside/ahead of 14/15
+given it's a reliability gap, not a feature. Playback-path GC and the
+memory/CPU limit re-check are done (see "Phase 6 design" above).
+Event/alarm stream is blocked on DVR account privilege and config, not
+code — revisit if that changes. No other Phase 6 items are currently
+open.

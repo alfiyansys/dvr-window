@@ -161,12 +161,32 @@ function syncOverlayPing(cell) {
   overlayPingObserver.observe(cellPing, { childList: true, characterData: true, subtree: true });
 }
 
+// Phase 14: give the focused cell's player full speed back and duty-cycle
+// every other cell's — see PLAN.md "Phase 14 design". `video._player` is
+// only set once setupHlsPlayer's start() has run for that cell, hence the
+// optional chaining (a cell whose player hasn't initialized yet has
+// nothing to throttle/restore regardless).
+function throttleOtherCells(exceptCell) {
+  for (const other of document.querySelectorAll('#grid .cell')) {
+    if (other === exceptCell) continue;
+    other.querySelector('video')?._player?.throttleBackground();
+  }
+}
+
+function restoreAllCells() {
+  for (const other of document.querySelectorAll('#grid .cell')) {
+    other.querySelector('video')?._player?.restoreForeground();
+  }
+}
+
 function openOverlay(cell, name, channelId, ptzEnabled) {
   const slot = document.getElementById('overlaySlot');
   const video = cell.querySelector('video');
   cell.dataset.videoHome = '1';
   video._homeCell = cell;
   slot.appendChild(video);
+  video._player?.restoreForeground();
+  throttleOtherCells(cell);
   document.getElementById('overlayName').textContent = name;
   syncOverlayStatus(cell);
   syncOverlayPing(cell);
@@ -263,6 +283,7 @@ document.getElementById('overlayFullscreen').onclick = toggleFullscreen;
 function closeOverlay() {
   if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
   returnSlottedVideoHome();
+  restoreAllCells();
   ptzStop();
   if (overlayStatusObserver) { overlayStatusObserver.disconnect(); overlayStatusObserver = null; }
   if (overlayPingObserver) { overlayPingObserver.disconnect(); overlayPingObserver = null; }
@@ -336,7 +357,10 @@ function setupHlsPlayer(video, status, hlsUrl) {
   }
 
   function scheduleRestart() {
-    setStatus('reconnecting…', 'loading');
+    // Phase 14: don't relabel an intentionally-throttled cell as broken -
+    // see the Hls.Events.ERROR handler in start() for why this can fire
+    // while backgrounded at all.
+    if (!backgrounded) setStatus('reconnecting…', 'loading');
     clearTimeout(retryTimer);
     retryTimer = setTimeout(() => {
       retryMs = Math.min(retryMs * 2, RETRY_MS_MAX);
@@ -399,6 +423,13 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // while the stream is healthy, matching this file's existing "costs
   // nothing while healthy" reasoning for the frozen-frame watchdog.
   function checkDrift() {
+    // Same reasoning as the armLagWatchdog guard below — currentTime is
+    // *expected* to be behind the live edge during a deliberate Phase 14
+    // duty-cycle pause, that's not real drift to escalate.
+    if (backgrounded) {
+      driftSinceMs = null;
+      return false;
+    }
     if (!hls || hls.liveSyncPosition == null || !Number.isFinite(hls.liveSyncPosition)) {
       driftSinceMs = null;
       return false;
@@ -421,6 +452,85 @@ function setupHlsPlayer(video, status, hlsUrl) {
     }
   }
 
+  // Phase 14: while a *different* cell's modal is focused, this cell
+  // duty-cycles instead of running full-speed (bandwidth/CPU contention
+  // with the focused stream) or fully freezing (a dead thumbnail) — see
+  // PLAN.md "Phase 14 design". stopLoad()/pause() halt new segment
+  // fetches and decode immediately; a chained one-shot-timer cycle (same
+  // style as the lag watchdog above, not setInterval) briefly resumes for
+  // BG_ON_MS every BG_OFF_MS to pull a fresh frame or two before pausing
+  // again. hls stays null on the native-Safari fallback path, so bgOn/
+  // bgOff only pause/play the <video> itself there — still cuts its
+  // segment fetching, just via the browser's own native HLS engine
+  // instead of hls.js.
+  const BG_OFF_MS = 10000;
+  const BG_ON_MS = 2000;
+  let backgrounded = false;
+  let bgTimer = null;
+  let bgBurstTimer = null;
+
+  function clearBgTimers() {
+    clearTimeout(bgTimer); bgTimer = null;
+    clearTimeout(bgBurstTimer); bgBurstTimer = null;
+  }
+
+  function bgOff() {
+    if (hls) hls.stopLoad();
+    video.pause();
+  }
+
+  function bgOn() {
+    if (hls) hls.startLoad();
+    video.play().catch(() => {});
+  }
+
+  function scheduleBgCycle() {
+    bgTimer = setTimeout(() => {
+      if (!backgrounded) return;
+      bgOn();
+      bgBurstTimer = setTimeout(() => {
+        if (!backgrounded) return;
+        bgOff();
+        scheduleBgCycle();
+      }, BG_ON_MS);
+    }, BG_OFF_MS);
+  }
+
+  function throttleBackground() {
+    if (backgrounded) return;
+    backgrounded = true;
+    // A lag-watchdog timer armed just before backgrounding began (e.g.
+    // from the last timeupdate a moment ago) is still mid-countdown here
+    // - the `backgrounded` guards in armLagWatchdog()/playing/timeupdate
+    // only stop it from being *re*-armed, they don't cancel one already
+    // ticking. Left alone, confirmed against the real DVR: it still
+    // fires setStatus('lagging…') and then, LAG_REBUILD_MS later,
+    // hls.destroy()+scheduleRestart() - a full unwanted teardown of a
+    // stream that was only ever intentionally paused, plus its own
+    // unguarded setStatus('reconnecting…'). Same cancellation the
+    // visibilitychange-hidden branch already does for the same reason.
+    clearLagTimers();
+    clearBgTimers();
+    bgOff();
+    scheduleBgCycle();
+  }
+
+  function restoreForeground() {
+    if (!backgrounded) return;
+    backgrounded = false;
+    clearBgTimers();
+    bgOn();
+    // Belt-and-suspenders against a stale reconnecting…/error label
+    // leaking through despite the Hls.Events.ERROR guard above - reassert
+    // live and restart the watchdog immediately rather than waiting on
+    // the next playing/timeupdate event to correct it. Harmless if the
+    // stream was already fine (the next real event just confirms it
+    // again); a genuinely broken stream still gets caught quickly by the
+    // now-unguarded (backgrounded is false again) watchdog/error paths.
+    setStatus('live', 'ok');
+    armLagWatchdog();
+  }
+
   function armLagWatchdog() {
     clearLagTimers();
     // Backgrounded tabs get their rendering/decoding throttled by the
@@ -428,6 +538,11 @@ function setupHlsPlayer(video, status, hlsUrl) {
     // even start the countdown while hidden (see visibilitychange
     // listener below, which re-arms with a fresh window on return).
     if (document.visibilityState !== 'visible') return;
+    // Same reasoning for our own deliberate duty-cycle pauses (above) —
+    // the lag/drift watchdogs exist to catch and escalate an
+    // *unintentional* stall, and would otherwise "fix" this intentional
+    // one every single off-cycle, defeating the point.
+    if (backgrounded) return;
     lagStatusTimer = setTimeout(() => {
       setStatus('lagging…', 'loading');
       lagRebuildTimer = setTimeout(() => {
@@ -445,22 +560,41 @@ function setupHlsPlayer(video, status, hlsUrl) {
       hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
+      // Phase 14: a rebuild triggered while backgrounded (from the
+      // ERROR handler below, or scheduleRestart() via the lag watchdog)
+      // would otherwise start loading/playing at full speed until the
+      // next scheduled duty-cycle boundary - immediately re-pause to
+      // match whatever phase the duty cycle is currently in instead.
+      if (backgrounded) bgOff();
       hls.on(Hls.Events.MANIFEST_PARSED, () => { retryMs = RETRY_MS_INITIAL; consecutiveErrors = 0; });
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
         clearLagTimers();
+        // Phase 14's own stopLoad()/startLoad() duty-cycling can itself
+        // trigger a fatal error here (confirmed against the real DVR:
+        // mediamtx tearing down the muxer/on-demand source mid-off-phase).
+        // That's not something to alarm the user about - see the
+        // backgrounded guard on the playing/timeupdate handlers below for
+        // the same reasoning - but it still needs the same real recovery
+        // action below. An earlier version of this fix no-op'd entirely
+        // while backgrounded instead of just suppressing the label; that
+        // was wrong - confirmed against the real DVR that repeated fatal
+        // errors with zero recovery attempts eventually leaves hls's
+        // underlying MediaSource permanently stuck, which is worse than a
+        // wrong status label. So: always recover, just skip the label
+        // while backgrounded.
         consecutiveErrors++;
         if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          setStatus('reconnecting…', 'loading');
+          if (!backgrounded) setStatus('reconnecting…', 'loading');
           hls.startLoad();
           return;
         }
         if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          setStatus('reconnecting…', 'loading');
+          if (!backgrounded) setStatus('reconnecting…', 'loading');
           hls.recoverMediaError();
           return;
         }
-        setStatus('error', 'err');
+        if (!backgrounded) setStatus('error', 'err');
         hls.destroy();
         hls = null;
         scheduleRestart();
@@ -485,6 +619,11 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // is the actual "frames are flowing" signal, so that's the one
   // place "live" gets set from here on.
   video.addEventListener('playing', () => {
+    // Also fires for our own Phase 14 duty-cycle resumes (bgOn) — leave
+    // the status label as whatever it last said rather than reasserting
+    // "live" from a deliberately throttled burst; the stream is fine,
+    // just intentionally deprioritized, not something to relabel.
+    if (backgrounded) return;
     setStatus('live', 'ok');
     armLagWatchdog();
   });
@@ -499,6 +638,10 @@ function setupHlsPlayer(video, status, hlsUrl) {
   // drops/duplicates frames under load (see ffmpeg's own `dup=`/
   // `drop=` counters in the run.sh log) without ever fully stalling.
   video.addEventListener('timeupdate', () => {
+    // Same as the 'playing' guard above — a Phase 14 duty-cycle burst
+    // fires real timeupdate events too, but shouldn't touch the status
+    // label or re-arm/escalate anything.
+    if (backgrounded) return;
     // Frames advancing doesn't necessarily mean "live" — checkDrift()
     // catches the case where they're advancing from well behind the live
     // edge (see PLAN.md "Phase 12 design"). Still calling armLagWatchdog()
@@ -537,10 +680,17 @@ function setupHlsPlayer(video, status, hlsUrl) {
     video.addEventListener('loadedmetadata', () => { retryMs = RETRY_MS_INITIAL; });
     video.addEventListener('error', () => {
       clearLagTimers();
-      setStatus('error', 'err');
+      // Same reasoning as the hls.js ERROR handler in start() - don't
+      // relabel an intentionally-throttled cell as broken.
+      if (!backgrounded) setStatus('error', 'err');
       scheduleRestart();
     });
   }
+
+  // Exposed so openOverlay/closeOverlay/showAdjacent (outside this
+  // closure) can throttle/restore this cell's player without duplicating
+  // any hls.js lifecycle logic — see PLAN.md "Phase 14 design".
+  video._player = { throttleBackground, restoreForeground };
 
   start();
 }
