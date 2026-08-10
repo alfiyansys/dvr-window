@@ -541,6 +541,20 @@ function setupHlsPlayer(video, status, hlsUrl) {
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data.fatal) return;
         clearLagTimers();
+        // Phase 14's own stopLoad()/startLoad() duty-cycling can itself
+        // trigger a fatal error here (confirmed against the real DVR:
+        // mediamtx tearing down the muxer/on-demand source mid-off-phase)
+        // - not a real failure to report or recover from ourselves.
+        // scheduleBgCycle()'s own bgOn() already re-calls startLoad() on
+        // its own schedule, so let it own recovery instead of racing it
+        // here, and don't touch the status label either - same reasoning
+        // as the backgrounded guard on the playing/timeupdate handlers
+        // below. Reset consecutiveErrors so throttle-induced churn never
+        // pre-counts against a genuine error noticed after restoreForeground().
+        if (backgrounded) {
+          consecutiveErrors = 0;
+          return;
+        }
         consecutiveErrors++;
         if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
           setStatus('reconnecting…', 'loading');
