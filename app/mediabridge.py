@@ -103,12 +103,17 @@ class MediaBridge:
     def __init__(self):
         self._proc: subprocess.Popen | None = None
         self.stream_names: list[str] = []
-        # name -> monotonic last-active timestamp, for gc_playback_paths.
+        # name -> path config, as pushed at start() — kept around so
+        # reconcile_paths (Phase 16) can re-push a live-view path that
+        # disappeared from mediamtx without this process restarting.
+        self._live_paths: dict[str, dict] = {}
+        # name -> monotonic last-active timestamp, for reconcile_paths.
         self._playback_paths: dict[str, float] = {}
 
     def start(self, device: DeviceConfig, channels: list[dict]) -> None:
         paths = _build_paths(device, channels)
         self.stream_names = list(paths.keys())
+        self._live_paths = paths
 
         if not MEDIAMTX_SELF_MANAGED:
             # mediamtx is already running as its own Swarm service (see
