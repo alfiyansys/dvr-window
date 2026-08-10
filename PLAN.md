@@ -22,7 +22,7 @@ Rationale in `ARCHITECTURE.md`.
 | 3 | ✅ done | PTZ — channels 9/10 (IP-proxy cameras) got PTZ hardware; `/api/ptz/{channelId}/{continuous,stop}` + live-view D-pad. Analog channels 1-4 still have no PTZ hardware. |
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
 | 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
-| 6 | ⬜ next | Polish — mediamtx process supervision/health check is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Playback-path GC and the memory/CPU limit re-check are ✅ done — design below. Packaging is done and Docker-only by decision — see `ARCHITECTURE.md`. Event/alarm stream is **blocked**, not attempted: real-device recon found the ISAPI account gets `403 lowPrivilege` on both the push event stream and the poll-based motion-detection status, motion detection itself is disabled, and the DVR has no alarm inputs configured — nothing to build against under the current account/config. Design below. |
+| 6 | ✅ done | Polish — mediamtx process supervision/health check is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Playback-path GC and the memory/CPU limit re-check are ✅ done — design below. Packaging is done and Docker-only by decision — see `ARCHITECTURE.md`. Event/alarm stream is deferred — needs DVR-side account privilege and config changes outside this codebase; see Non-goals. Design below. |
 | 7 | ✅ done | Continuous playback across recording-segment boundaries — auto-advance into the next segment instead of freezing at the end of one; skip forward over a real recording gap instead of stopping. See `ARCHITECTURE.md` "Continuous playback across recording segments". |
 | 8 | ✅ done | Day timeline scrubber for playback — horizontal bar showing the loaded day's recorded segments/gaps, click-to-seek, reusing the existing playback-start/gap-clamp mechanism. See `ARCHITECTURE.md` "Day timeline scrubber". |
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
@@ -62,7 +62,7 @@ Three remaining Phase 6 items, two done this round:
   (roughly double the confirmed clean-connection floor). Full numbers,
   methodology, and the reconnect-churn caveat in `ARCHITECTURE.md`
   under "Memory/CPU limit re-check (Phase 6)".
-- **Event/alarm stream** (blocked, not attempted): real-device recon
+- **Event/alarm stream** (deferred, not attempted): real-device recon
   against the actual DVR found the ISAPI account gets `403
   lowPrivilege` on both `/ISAPI/Event/notification/alertStream` (the
   push event stream) and the poll-based
@@ -822,18 +822,16 @@ playlist returning `200` afterward, not just that the path existed.
   only supported deployment path — it's already built, working, and
   running in production (`docker-compose.yml` standalone,
   `docker-compose.swarm.yml` for the mediamtx-split Swarm setup).
+- Event/alarm stream — deferred, not a code gap: the ISAPI account
+  gets `403 lowPrivilege` on both the push and poll mechanisms, motion
+  detection is disabled, and no alarm inputs are configured on the
+  DVR. Revisit only if the DVR account/config changes.
 
 ## Next step
 
-Phase 14 (prioritize focused-camera stream speed via background
-throttling — design above) is next up for implementation, followed by
-Phase 15's first stage (15.1: client-side classical enhancement for
-the focused stream, with the ML stages 15.2-15.4 staged for later —
-design above). Phase 16 (self-heal mediamtx live-view paths after an
-independent restart — design above) was added 2026-08-10 after a real
-production incident and should be prioritized alongside/ahead of 14/15
-given it's a reliability gap, not a feature. Playback-path GC and the
-memory/CPU limit re-check are done (see "Phase 6 design" above).
-Event/alarm stream is blocked on DVR account privilege and config, not
-code — revisit if that changes. No other Phase 6 items are currently
-open.
+Phase 6 is fully done. Phases 14 (focused-stream throttling) and 16
+(mediamtx live-view path self-heal) are both done and deployed to
+production (2026-08-10). Phase 15's first stage (15.1: client-side
+classical enhancement for the focused stream, with the ML stages
+15.2-15.4 staged for later — design above) is next up for
+implementation.
