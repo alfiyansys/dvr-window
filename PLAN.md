@@ -32,7 +32,7 @@ Rationale in `ARCHITECTURE.md`.
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
 | 14 | ✅ done | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism, the `reconnecting…`-status bug found during verification, and a second stale-lag-timer bug found while re-verifying the fix are all fixed and confirmed against the real DVR (2026-08-10) — background cells held `live` across 5+ minutes/many duty cycles, Prev/Next handoff and modal close both restore correctly. Design below. |
 | 15 | ⬜ next | Client-side real-time video enhancement for the focused/modal stream only (WebGL2 shader pipeline; user-selectable mode, staged incrementally toward an optional ML mode). Design below. |
-| 16 | ⬜ next | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which today requires a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Design below. |
+| 16 | ✅ done | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which previously required a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Implemented and verified (2026-08-10): recreated the exact incident locally (`docker-compose.yml`'s network-mode split, killed and fully recreated the `mediamtx` container while `dvr-window` kept running) — confirmed the fresh container came up with zero paths, then self-healed within one 30s sweep with no `dvr-window` restart, HLS confirmed actually serving again afterward. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -773,22 +773,44 @@ polling loop:
   `dvr-window` has no direct visibility into anyway (they're separate
   containers).
 
-**Open question to resolve before implementing**: whether to
-distinguish "mediamtx restarted and lost paths" from "mediamtx is
-still starting up and hasn't been pushed to yet" (e.g. right after a
-fresh `docker stack deploy` of both services together, before
-`dvr-window`'s own startup push has run) — the reconciliation sweep
-firing during that brief legitimate window should just push paths
-early/harmlessly, not log a spurious "recovered from a gap" line.
+**Resolved without special-casing**: the worried-about race — "mediamtx
+restarted and lost paths" vs. "mediamtx is still starting up and hasn't
+been pushed to yet" (e.g. right after a fresh `docker stack deploy` of
+both services together) — turns out not to need distinguishing.
+`MediaBridge.start()` already pushes every path and waits for mediamtx
+to be ready before returning, and the reconciliation loop's first sweep
+can't fire until 30s after *this process's own* startup — by
+construction, the initial push always happens first. A path still
+missing by the first sweep is always a real gap, never a startup race.
 
-**Verification plan** (per `AGENTS.md` — against the real DVR, not
-just reasoned about): simulate the real incident directly — kill the
-`mediamtx` container while `dvr-window` keeps running (matches how
-this was found originally, per the Phase 6 design's "Known gap"
-discovery), confirm live view is broken immediately after, then
-confirm it self-recovers within one GC cycle with no manual
-intervention, and confirm the new log line appears exactly once per
-genuine recovery, not on every sweep.
+**Implemented**: `gc_playback_paths()` renamed `reconcile_paths()`
+(`app/mediabridge.py`) — same 30s loop in `app/main.py`
+(`_reconcile_paths_loop`), one shared `GET /v3/paths/list` call now
+drives both the live-view re-push (network mode only — self-managed
+mode's mediamtx is a direct child subprocess with no equivalent gap)
+and the original playback-path GC. `MediaBridge.start()` now also keeps
+the pushed `{name: path_config}` dict (`self._live_paths`) so a missing
+path can be reconstructed exactly, not just detected.
+
+**Verified (2026-08-10)**, real incident recreated locally rather than
+just reasoned about: brought up `docker-compose.yml`'s network-mode
+split (`docker compose up -d`, the same `MEDIAMTX_HOST=mediamtx` path
+production uses), confirmed all 12 paths registered, then `docker rm -f`
++ recreate on just the `mediamtx` container (matching a Swarm task
+replacement more closely than `docker kill`+`start`, which turned out to
+reuse the same container and not actually reproduce the gap) while
+`dvr-window` kept running throughout. Confirmed via mediamtx's own
+loaded config (`paths: {}`) that the fresh container genuinely started
+with nothing registered, then confirmed all 12 paths back within one
+sweep with **no `dvr-window` restart** — `docker logs` (via `rtk proxy`,
+since the default filtered view was summarizing away the plain `print()`
+lines) showed a `[reconcile] re-registered missing live-view path: ...`
+line for exactly the paths that were actually missing, once per genuine
+recovery — it fired twice total across the session, matching the two
+real disruptions caused during testing, and stayed silent on every other
+30s sweep in between where nothing needed fixing. Confirmed end-to-end
+with an authenticated `curl` against the recovered `ch1_main` HLS
+playlist returning `200` afterward, not just that the path existed.
 
 ## Non-goals (for now)
 

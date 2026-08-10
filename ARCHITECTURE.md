@@ -334,19 +334,37 @@ browser check against the real domain showed all 6 channels reaching
 (isolated Docker network, separate from the running production
 service) that caught the `add`-vs-`replace` bug above.
 
-**Known gap: mediamtx restarting alone loses live-view paths.** The
-idempotent-`replace` fix above covers `dvr-window` restarting without
-`mediamtx`; the reverse isn't handled. Live-view paths are only ever
-pushed once, at `dvr-window`'s own startup (`MediaBridge.start()`) —
-if `mediamtx` restarts on its own (crash, redeploy of just that
-service) while `dvr-window` keeps running, the fresh `mediamtx`
-process comes up with none of the `ch{id}_main/sub` paths registered
-and live view breaks until `dvr-window` itself also restarts. Found
-while re-creating just the `mediamtx` container during the Phase 6
-memory-limit re-check below (`ch1_main` HLS request returned `500`
-until both containers were recreated together). Not fixed here — out
-of scope for this round — but worth fixing before relying on
-`mediamtx`'s own `restart_policy` to recover unattended.
+**Fixed (Phase 16): mediamtx restarting alone used to lose live-view
+paths.** The idempotent-`replace` fix above covers `dvr-window`
+restarting without `mediamtx`; the reverse wasn't handled at first.
+Live-view paths were only ever pushed once, at `dvr-window`'s own
+startup (`MediaBridge.start()`) — if `mediamtx` restarted on its own
+(crash, redeploy of just that service) while `dvr-window` kept running,
+the fresh `mediamtx` process came up with none of the `ch{id}_main/sub`
+paths registered and live view broke until `dvr-window` itself also
+restarted. Found while re-creating just the `mediamtx` container during
+the Phase 6 memory-limit re-check below (`ch1_main` HLS request
+returned `500` until both containers were recreated together). Left
+unfixed for that round, then triggered again for real in production
+(`sm-qohelet`/`sw-david01`, 2026-08-10 — mediamtx OOM-killed under a
+since-corrected stale resource limit) and read by users as an endless
+reconnect loop, at which point it got fixed: `MediaBridge.start()` now
+keeps the pushed `{name: path_config}` dict (`self._live_paths`), and
+the existing 30s playback-path-GC sweep (renamed `reconcile_paths()`,
+`app/mediabridge.py`) shares its one `GET /v3/paths/list` call to also
+re-push any live-view path missing from mediamtx's response — network
+mode only, since self-managed mode's mediamtx is a direct child
+subprocess with no equivalent gap. Bounds an outage to one sweep
+interval (≤30s) instead of an indefinite one requiring manual
+intervention. Verified by recreating the exact gap locally (network-mode
+`docker-compose.yml`, `docker rm -f` + recreate on just the `mediamtx`
+container — `docker kill`+`start` turned out to reuse the same container
+and not actually reproduce it — while `dvr-window` kept running
+throughout): confirmed via mediamtx's own loaded config that the fresh
+container started with zero paths, then confirmed all 12 back within
+one sweep with no `dvr-window` restart, and confirmed the recovered
+`ch1_main` HLS playlist actually serving (`200`) again afterward. Full
+design/verification detail in `PLAN.md` "Phase 16 design".
 
 ### Memory/CPU limit re-check (Phase 6)
 
