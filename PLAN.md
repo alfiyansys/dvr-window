@@ -30,7 +30,7 @@ Rationale in `ARCHITECTURE.md`.
 | 11 | ✅ done | Detect a *lagging* stream (still connected, no fatal hls.js error, but frames have stopped advancing) as a status distinct from live/reconnecting/error. Design below. |
 | 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
-| 14 | ⬜ next | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Design below. |
+| 14 | ✅ done | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism, the `reconnecting…`-status bug found during verification, and a second stale-lag-timer bug found while re-verifying the fix are all fixed and confirmed against the real DVR (2026-08-10) — background cells held `live` across 5+ minutes/many duty cycles, Prev/Next handoff and modal close both restore correctly. Design below. |
 | 15 | ⬜ next | Client-side real-time video enhancement for the focused/modal stream only (WebGL2 shader pipeline; user-selectable mode, staged incrementally toward an optional ML mode). Design below. |
 | 16 | ⬜ next | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which today requires a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Design below. |
 
@@ -506,6 +506,84 @@ just reasoned about):
 - Confirm channel 10 specifically (the transcode risk above) — check
   mediamtx's logs for repeated `ffmpeg` spin-up/teardown during a
   modal session, not just that the picture looks fine.
+
+**Verified against the real DVR (2026-08-10) — confirmed working, plus
+one real bug found:**
+
+- **Working as designed**: duty-cycle timing matches spec exactly —
+  sampled `video.paused`/`currentTime` directly (not just read the
+  code) on both a normal background cell and channel 10, both showed
+  the expected ~10s-paused / ~2s-resumed-and-advancing pattern. The
+  focused cell (`Teras`) kept advancing continuously and unthrottled
+  throughout. `closeOverlay()` correctly restored all 5 background
+  cells back to `live`.
+- **Bug found — throttled cells get stuck on "reconnecting…"
+  indefinitely, not just channel 10**: after a few minutes with a
+  modal open, *all five* background cells (not only the wireless-hop
+  9/10 ones) ended up permanently showing `reconnecting…` in the
+  status badge, even though their video was demonstrably still alive
+  and advancing every `BG_ON_MS` burst (confirmed via direct
+  `currentTime` sampling — the picture itself was fine, only the label
+  was wrong). Root cause, traced through both the code and mediamtx's
+  own log:
+  1. `bgOff()`'s `hls.stopLoad()` can itself trigger a fatal `hls.js`
+     `NETWORK_ERROR` — mediamtx's log showed a muxer/on-demand-source
+     teardown (`[muxer ch9_main] destroyed: muxer error...` →
+     `[RTSP source] stopped: not needed by anyone`) lining up exactly
+     with an off-cycle.
+  2. The `Hls.Events.ERROR` handler (`static/index.html:541-559`) has
+     **no `backgrounded` guard** — unlike the Phase 11/12 watchdogs and
+     the `playing`/`timeupdate` handlers, which this phase's design
+     *did* remember to guard (see the bullet above). So the fatal
+     error unconditionally calls `setStatus('reconnecting…', ...)`.
+  3. There is then **no path back to `live`** while still
+     backgrounded: the only code that reasserts `live` (the
+     `playing`/`timeupdate` handlers) explicitly `return`s early
+     whenever `backgrounded` is true (by design, to avoid relabeling a
+     deliberate pause as broken) — so once the error handler sets
+     `reconnecting…`, nothing clears it until `restoreForeground()`
+     runs at modal-close.
+  
+  This directly contradicts this phase's own stated goal ("leave
+  whatever the cell's `.status` last said... the stream genuinely is
+  fine") — in practice it does the opposite, since `stopLoad()` itself
+  is exactly what's prone to causing that first fatal error.
+
+**Fixed and re-verified against the real DVR (2026-08-10), in three commits
+— the first attempt turned out to be wrong and needed a second pass:**
+
+1. Guarded the `Hls.Events.ERROR` handler so a fatal error while
+   `backgrounded` doesn't call `setStatus(...)`. **First attempt made it
+   a full no-op instead** (skipped `startLoad()`/`recoverMediaError()`/
+   rebuild too, not just the label) — re-verifying that version found it
+   left `hls`'s underlying `MediaSource` permanently stuck after enough
+   duty-cycle churn (`currentTime` frozen, unresponsive even to a manual
+   `restoreForeground()` call), which is worse than a wrong label. Fixed
+   by keeping the exact same tiered recovery (`startLoad()` →
+   `recoverMediaError()` → full rebuild) unconditionally, and only
+   wrapping the `setStatus(...)` calls (in the handler itself,
+   `scheduleRestart()`, and the Safari-native fallback's `error`
+   listener) in `if (!backgrounded)`. A rebuild triggered while
+   backgrounded now also immediately re-`bgOff()`s so it doesn't blast
+   at full speed until the next scheduled duty-cycle boundary.
+2. `restoreForeground()` now explicitly calls `setStatus('live', 'ok')`
+   + `armLagWatchdog()` right after `bgOn()`, instead of waiting for the
+   next `playing`/`timeupdate` event — belt-and-suspenders against any
+   stale label.
+3. **Second bug found while re-verifying fix #1**: `throttleBackground()`
+   never cancelled an already-in-flight lag-watchdog timer — one armed
+   moments before backgrounding began would still fire mid-throttle,
+   setting `lagging…` and then, 15s later, tearing down and rebuilding
+   `hls` entirely for a stream that was only ever intentionally paused.
+   Fixed by adding `clearLagTimers()` to `throttleBackground()`, the same
+   cancellation the `visibilitychange`-hidden branch already did for the
+   identical reason.
+4. Re-verified end to end: modal left open 5+ minutes / many duty
+   cycles, all five background cells held `live` throughout with
+   `currentTime` independently confirmed still advancing each burst (no
+   recurrence of the stuck-`reconnecting…` or frozen-`MediaSource`
+   failure modes); Prev/Next handoff and modal close both restored
+   every cell correctly.
 
 ## Phase 15 design: client-side real-time stream enhancement (focused stream only, staged toward ML)
 

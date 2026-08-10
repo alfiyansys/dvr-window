@@ -108,9 +108,11 @@ git push github main && git push gitlab main
 
 ## Conventions
 
-- Commit granularly — one commit per logical change/finding, not one
-  giant commit per session. This has been the working style throughout
-  and made the history genuinely useful for tracing why a fix exists.
+- Commit granularly, as you go — one commit per logical change/finding,
+  made as soon as that piece is done, not saved up and dumped in a
+  batch at the end of a phase/session. This has been the working style
+  throughout and made the history genuinely useful for tracing why a
+  fix exists.
 - Keep `PLAN.md` (roadmap/status), `ARCHITECTURE.md` (technical
   reference), and `MEMORY.md` (device state snapshot) up to date as
   you go — don't let them drift from what the code actually does.
