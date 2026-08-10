@@ -312,6 +312,14 @@ class EnhancementPipeline {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      // texImage2D uploads row 0 of the video frame (its top row) to
+      // texture v=0, but the vertex shader's UV mapping puts v=0 at the
+      // bottom of the screen (gl_Position y=-1) - without this, the
+      // rendered frame comes out vertically flipped versus the plain
+      // <video> it's replacing. Standard WebGL fix: flip on unpack
+      // instead of changing the UV math, so uTexel's neighbor-pixel
+      // offsets in the shader stay simple screen-space deltas.
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
       this.uFrameLoc = gl.getUniformLocation(program, 'uFrame');
       this.uTexelLoc = gl.getUniformLocation(program, 'uTexel');
