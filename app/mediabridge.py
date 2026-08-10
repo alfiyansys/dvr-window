@@ -266,20 +266,43 @@ class MediaBridge:
         )
         self._playback_paths.pop(name, None)
 
-    def gc_playback_paths(self, idle_ttl: float = 60.0) -> list[str]:
-        """Delete playback/download paths nobody has read in idle_ttl seconds —
-        covers a client abandoning playback without calling
-        /api/playback/stop (closed tab, dead network), which would otherwise
-        leak the mediamtx path forever. Only ever touches paths this backend
-        itself registered via add_playback_path, never the always-on
-        ch{id}_main/sub live-view paths.
+    def reconcile_paths(self, idle_ttl: float = 60.0) -> tuple[list[str], list[str]]:
+        """Called every 30s from the background sweep in app/main.py — does
+        two independent jobs against one shared `GET /v3/paths/list` call
+        rather than two separate polls:
 
-        A brand-new path's tracked timestamp starts at creation time, so it
-        already gets a full idle_ttl of grace before a client has to connect
-        — no separate "just created" grace period needed.
+        1. Re-push any live-view path (ch{id}_main/sub) missing from
+           mediamtx (Phase 16). Covers mediamtx restarting on its own in
+           network mode — a crash, OOM-kill, or a redeploy of just that
+           service — while this process keeps running: MediaBridge.start()
+           only ever pushes these paths once, at this process's own
+           startup, so the previous behavior was a fresh mediamtx coming
+           up with none of them registered and live view staying broken
+           until this process also restarted (see ARCHITECTURE.md "Known
+           gap: mediamtx restarting alone loses live-view paths"). Bounds
+           the outage to one sweep interval instead. Self-managed mode
+           (bare-metal/single-container) has no such gap — mediamtx there
+           is a direct child subprocess sharing this process's lifetime —
+           so this only runs in network mode.
+
+           No special-casing needed for "mediamtx just hasn't been pushed
+           to yet" (e.g. right after a fresh `docker stack deploy` of both
+           services together): start() already pushes every path and
+           awaits mediamtx being ready before this loop's first sweep can
+           even run 30s later, so a path still missing by then is a real
+           gap, not a startup race.
+        2. The original playback-path GC: delete a playback/download path
+           nobody has read in idle_ttl seconds, covering a client
+           abandoning playback without calling /api/playback/stop (closed
+           tab, dead network) — otherwise leaks the mediamtx path forever.
+           A brand-new path's tracked timestamp starts at creation time,
+           so it already gets a full idle_ttl of grace before a client has
+           to connect — no separate "just created" grace period needed.
+
+        Returns (live_paths_recovered, playback_paths_removed).
         """
-        if not self._playback_paths:
-            return []
+        if MEDIAMTX_SELF_MANAGED and not self._playback_paths:
+            return [], []
         try:
             resp = httpx.get(
                 f"http://{MEDIAMTX_HOST}:{API_PORT}/v3/paths/list",
@@ -289,7 +312,14 @@ class MediaBridge:
             resp.raise_for_status()
             items = {item["name"]: item for item in resp.json()["items"]}
         except httpx.HTTPError:
-            return []
+            return [], []
+
+        recovered = []
+        if not MEDIAMTX_SELF_MANAGED:
+            for name, path_config in self._live_paths.items():
+                if name not in items:
+                    self._add_path(name, path_config)
+                    recovered.append(name)
 
         now = time.monotonic()
         removed = []
@@ -306,7 +336,8 @@ class MediaBridge:
             if now - last_active >= idle_ttl:
                 self.remove_playback_path(name)
                 removed.append(name)
-        return removed
+
+        return recovered, removed
 
     def capture_clip(self, name: str, duration_seconds: float, output_path: Path) -> None:
         """Capture `duration_seconds` of video from a playback path into an
