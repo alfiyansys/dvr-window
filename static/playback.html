@@ -5,30 +5,8 @@
 <title>DVR Window — Playback</title>
 <script src="/static/vendor/hls.min.js"></script>
 <script src="/static/auth.js"></script>
-<style>
-  body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
-  h1 { font-size: 18px; font-weight: 600; }
-  a.nav { color: #93c5fd; font-size: 13px; }
-  .controls { display: flex; gap: 8px; align-items: center; margin: 16px 0; flex-wrap: wrap; }
-  select, input, button { background: #1c1c1c; color: #eee; border: 1px solid #333; border-radius: 4px; padding: 6px 10px; font-size: 13px; }
-  button { cursor: pointer; }
-  button:hover { background: #2a2a2a; }
-  .layout { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-  .segments { flex: 0 0 320px; max-height: 480px; overflow-y: auto; border: 1px solid #333; border-radius: 6px; }
-  .segment { padding: 8px 10px; border-bottom: 1px solid #262626; font-size: 13px; cursor: pointer; }
-  .segment:hover { background: #1c1c1c; }
-  .segment.active { background: #1e3a5f; }
-  .player { flex: 1 1 480px; background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
-  .player video { width: 100%; display: block; background: #000; aspect-ratio: 16/9; }
-  .player .bar { padding: 8px 10px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; }
-  .empty { padding: 12px; color: #888; font-size: 13px; }
-
-  .timeline { position: relative; height: 34px; background: #0a0a0a; cursor: pointer; border-top: 1px solid #262626; }
-  .timeline .block { position: absolute; top: 6px; height: 14px; background: #3b7ddb; border-radius: 2px; min-width: 2px; }
-  .timeline .block:hover { background: #5b9bf5; }
-  .timeline .tick { position: absolute; top: 22px; font-size: 10px; color: #666; transform: translateX(-50%); pointer-events: none; }
-  .timeline .marker { position: absolute; top: 0; width: 2px; height: 100%; background: #f87171; pointer-events: none; display: none; }
-</style>
+<link rel="stylesheet" href="/static/shared.css">
+<link rel="stylesheet" href="/static/playback.css">
 </head>
 <body>
 <a class="nav" href="/">&larr; Live View</a>

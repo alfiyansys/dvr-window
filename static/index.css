@@ -1,5 +1,4 @@
-body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
-h1 { font-size: 18px; font-weight: 600; }
+/* body/h1 moved to shared.css (identical to playback.css's own rules) */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
 .cell { background: #000; border: 1px solid #333; border-radius: 6px; overflow: hidden; cursor: pointer; }
 .cell:hover { border-color: #666; }
