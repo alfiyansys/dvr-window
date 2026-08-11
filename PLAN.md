@@ -35,6 +35,10 @@ Rationale in `ARCHITECTURE.md`.
 | 15.2 | ⬜ later | ML groundwork for stream enhancement, not yet user-facing — pick and vendor a lightweight browser-capable model + runtime (`static/vendor/`, no CDN), land it as a dev-only `ml` processor behind a flag so real FPS/quality can be measured against this DVR's actual streams before committing to ship it. Depends on 15.1's pipeline/canvas/lifecycle plumbing. Design below. |
 | 15.3 | ⬜ later | `AI` becomes a real, user-facing selector option — gated by a runtime capability/performance check that auto-falls-back to `Classical` on a device too weak for the ML pass. Depends on 15.2 having already proven the model/runtime choice on real hardware. Design below. |
 | 16 | ✅ done | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which previously required a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Implemented and verified (2026-08-10): recreated the exact incident locally (`docker-compose.yml`'s network-mode split, killed and fully recreated the `mediamtx` container while `dvr-window` kept running) — confirmed the fresh container came up with zero paths, then self-healed within one 30s sweep with no `dvr-window` restart, HLS confirmed actually serving again afterward. Design below. |
+| 17.1 | ⬜ next | Browser-side FPS/perf instrumentation for the live grid — no such tooling exists yet, and Phase 15.1's own "zero measurable impact on the grid" verification item was never completed for exactly that reason. Foundational: nothing else in Phase 17 can be honestly verified without it. Design below. |
+| 17.2 | ⬜ later | Low-risk grid tuning: hls.js buffer/back-buffer config, staggered initial connection storm, CSS containment on grid cells. Depends on 17.1 for before/after numbers. Design below. |
+| 17.3 | ⬜ later | Backend prerequisite for 17.4 — verify real per-channel `sub`-stream codec against the DVR, and drop `_build_paths`'s H.265 transcode restriction to `_main`-only paths so a switch to `sub` in the grid doesn't ship an unplayable H.265 stream to Chrome. Design below. |
+| 17.4 | ⬜ later | Grid cells switch from `main` to `sub` (the actual decode-cost fix — CSS scaling doesn't reduce browser decode work, so all 6 cells currently decode full-resolution for thumbnail-sized boxes), modal keeps `main`, via `hls.loadSource()` source-swap on open/close rather than a second instance or a full rebuild. Depends on 17.3. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -869,6 +873,197 @@ real disruptions caused during testing, and stayed silent on every other
 with an authenticated `curl` against the recovered `ch1_main` HLS
 playlist returning `200` afterward, not just that the path existed.
 
+## Phase 17 design: browser-side FPS for the live grid
+
+**Problem**: the live grid (`static/index.js`) runs one independent
+hls.js instance per channel (currently 6: analog 1-4 + IP-proxy 9-10),
+all decoding continuously and simultaneously all the time — Phase 14's
+throttling only kicks in for non-focused cells while the modal is open.
+Every cell requests each channel's `main` (full-resolution) stream, even
+though grid cells are laid out as small ~320×180px CSS Grid tiles — the
+full-res decode is thrown away by CSS scaling; the browser doesn't
+decode less because the element is drawn smaller. hls.js is constructed
+with only `{ lowLatencyMode: true, xhrSetup }`, no buffer/back-buffer
+tuning. There is currently **zero FPS/performance instrumentation**
+anywhere in the codebase — Phase 15.1's own verification checklist
+includes "confirm zero measurable impact on the grid's other 5 cells,"
+which was never completed because there was no tool to measure it with.
+
+Four sub-phases, ordered so each is validated with real numbers before
+the next relies on it, per this project's real-DVR/real-client
+verification standard (`AGENTS.md`):
+
+### 17.1: FPS/perf instrumentation (foundational)
+
+Nothing else in Phase 17 can be honestly verified without this — it
+closes the exact gap that left Phase 15.1's own checklist unfinished.
+
+- New `static/debugfps.js`, gated behind
+  `localStorage.getItem('debugFps') === '1'` (settable via
+  `?debugFps=1`, same persistence pattern as `enhance.js`'s
+  `enhanceMode`) — zero extra work on a normal page load when disabled.
+- **Per-grid-cell decode stats**: poll `video.getVideoPlaybackQuality()`
+  (delta `totalVideoFrames`/`droppedVideoFrames` per ~1s, one
+  `setInterval` per cell) — a cheap counter read, not a per-frame
+  callback, so measuring 6 cells doesn't itself add decode contention.
+- **Modal/focused video**: reuse the `requestVideoFrameCallback` pattern
+  already established in `enhance.js` (only one stream; the callback may
+  already be firing there if enhancement is active).
+- **Page-level jank**: one single global `requestAnimationFrame` loop
+  (not per-video) to separate "video decode is slow" from "main thread
+  is janky for unrelated reasons" (e.g. the status/ping
+  `MutationObserver` mirroring in `index.js:11-37`).
+- Small on-screen badge per cell when the flag is on (e.g.
+  `24fps / 2 drop`). One new `<script>` tag in `index.html` near the
+  existing `enhance.js` tag.
+
+**Verification plan**: real DVR, all 6 real channels live — counters
+read sane numbers (cross-check against each channel's actual encoder
+frame rate, not an assumed 25/30fps); confirm negligible CPU overhead
+with the flag on vs. off (Chrome Task Manager, real client hardware);
+confirm zero DOM/console difference with the flag off.
+
+### 17.2: low-risk grid tuning (buffer config + connect stagger + CSS containment)
+
+Bundled into one phase/PR — each item is individually small, low-risk,
+and validated by the same 17.1 before/after run.
+
+- **hls.js buffer config** (`static/index.js:465`, the `new Hls({...})`
+  in `start()`): add `maxBufferLength: 10`, `maxMaxBufferLength: 20`,
+  `backBufferLength: 10` (down from library defaults) to reduce
+  buffering/memory overhead across 6 concurrently-open `MediaSource`
+  buffers. No real ABR to tune here — each stream is a single-rendition
+  HLS path, not a multi-bitrate variant playlist, so hls.js's ABR
+  machinery has nothing to select between.
+  **Real regression risk**: channels 9/10's wireless link has
+  documented jitter (existing `dup=`/`drop=` comments, generous
+  watchdog thresholds already tuned around it) — shrinking buffers
+  could increase false-positive "lagging…"/rebuild triggers specifically
+  on those channels. Needs an overnight real-DVR soak test watching 9/10
+  for status flapping, not a smoke test.
+- **Stagger initial connection storm** (`main()`,
+  `static/index.js:628-657`): defer each cell's `setupHlsPlayer(...)`
+  call by `index * ~250ms` via `setTimeout`, keeping DOM/skeleton
+  creation synchronous. Smooths the initial burst of up to 6
+  simultaneous manifest fetches + mediamtx on-demand ffmpeg cold-starts;
+  doesn't reduce steady-state per-frame CPU cost once all 6 are
+  decoding — real but lower-priority than the buffer tuning above.
+- **CSS containment** (`static/index.css`, `.cell` rule): add
+  `contain: layout paint style` (not `contain: size` — would fight the
+  existing `minmax(320px, 1fr)` + `aspect-ratio: 16/9` intrinsic
+  sizing). Scopes each cell's layout/paint boundary so per-cell
+  status/ping DOM churn doesn't force sibling-cell recalculation.
+  Explicitly not adding `content-visibility: auto` (no off-screen cells
+  to skip in a normally-all-visible 6-cell grid) or `will-change`
+  (forces a compositor layer per cell for no real benefit here — cells
+  aren't animated).
+
+**Verification plan**: 17.1's instrumentation before/after for
+connect-burst network waterfall + page-level jank; overnight real-DVR
+soak specifically on channels 9/10 for buffer-tuning regressions;
+visual check that `contain: paint` doesn't break the existing
+`overflow: hidden`/border-radius clipping on `.cell`.
+
+### 17.3: backend prerequisite — sub-stream codec verification + transcode-scope fix
+
+Hard prerequisite for 17.4 — not parallelizable with it. The backend
+already exposes a `sub` HLS path for every channel via `/api/streams`
+(`kind: "sub"`); the frontend just never requests it.
+
+- **Verify real codec** of each channel's `sub` stream against the
+  actual DVR (ffprobe, or the DVR's own ISAPI capability response — same
+  source `_build_paths` already reads `stream["codec"]` from) for all 6
+  channels. Cheap and read-only; determines how much of 17.3b/17.4 this
+  deployment actually needs. `MEMORY.md` currently flags analog
+  channels' sub-streams as possibly still H.265 (unverified).
+- **Fix `_build_paths`'s transcode scope** (`app/mediabridge.py:95`):
+  currently `if stream["codec"] == "H.265" and name.endswith("_main")`
+  — drop the `_main`-only restriction (`if stream["codec"] == "H.265":`)
+  so any H.265 sub-stream also gets transcoded once the frontend starts
+  requesting it; otherwise it would ship an unplayable stream to Chrome
+  (no native HEVC/MSE support). Update the adjacent comment and
+  `ARCHITECTURE.md`'s matching "H.265→H.264 transcode for main streams"
+  section.
+
+**Real risk — the biggest in this whole phase**: `ARCHITECTURE.md`
+already documents the existing single (channel 10 main) transcode
+running at only ~1.0-1.05x real-time with "little CPU headroom." If
+17.3a finds analog sub-streams are also H.265, going from 1 to
+potentially 5-6 concurrent transcodes could overwhelm the production
+host. This may mean 17.4 ships scoped down (only channels with
+natively-H.264 subs switch; H.265-sub channels stay on `main` in the
+grid) rather than a blanket switch.
+
+**Verification plan**: codec confirmed per channel, documented; for any
+newly-transcoded sub-stream, confirm output actually plays and matches
+source (same `ffmpeg -frames:v 1` comparison method already used for
+the main-stream transcode); confirm sustained CPU headroom on the
+actual production host over a realistic period, not just a dev-box
+smoke test.
+
+### 17.4: frontend — grid uses `sub`, modal uses `main`
+
+The actual decode-cost win. Gated on 17.3 landing and being verified for
+this deployment's real channel set.
+
+**Mechanism**: same hls.js instance, `hls.loadSource(newUrl)` swap on
+modal open/close — not a second instance, not a full rebuild.
+- Two instances (separate always-alive grid player + on-demand modal
+  player) would break the single-`<video>`-node-relocation pattern that
+  Phase 14 (`throttleBackground`/`restoreForeground`) and Phase 15.1
+  (`applyEnhancement` targeting "whichever video is in `#overlaySlot`")
+  both depend on, for marginal benefit.
+- A full instance rebuild (`hls.destroy()` + new `Hls()`) reuses the
+  existing `start()` path, but that path is documented (above) as
+  blanking the video to black until rebuffered — already a known
+  complaint for background-cell rebuilds; making it the standard cost
+  of every modal open/close would likely reproduce that complaint
+  constantly.
+- `hls.loadSource()` on the existing attached instance is hls.js's
+  documented mechanism for switching content on a live player without a
+  full rebuild.
+
+**Concrete changes** (`static/index.js`):
+- `setupHlsPlayer(video, status, subUrl, mainUrl)` — track a mutable
+  `currentUrl` instead of the current single closed-over `hlsUrl`.
+- New `switchSource(newUrl)`: no-op if already current; otherwise reset
+  watchdog state the same way a fresh `MANIFEST_PARSED` would
+  (`retryMs`, `consecutiveErrors`, `driftSinceMs`, `clearLagTimers()`),
+  then `hls.loadSource(newUrl)` (or `video.src = newUrl` on the
+  native-Safari fallback path).
+- `video._player = { throttleBackground, restoreForeground, switchSource }`.
+- `main()`: resolve both `sub` and `main` stream URLs per channel; grid
+  cells build against `sub` (store `main` on `cell.dataset.mainUrl`);
+  defensive fallback to `main` (with `console.warn`) if a channel has
+  no `sub` entry.
+- `openOverlay()` (`index.js:61-77`): call
+  `video._player?.switchSource(mainUrl)` before
+  `video._player?.restoreForeground()` — ordering matters, since a
+  queued `pendingRebuild` reads the shared `currentUrl` when it fires.
+- `closeOverlay()`/`showAdjacent()` (`index.js:126-135, 165-183`): call
+  `video._player?.switchSource(subUrl)` on the outgoing video,
+  symmetric placement.
+- No changes needed to `syncOverlayStatus`/`syncOverlayPing` or
+  `enhance.js` — both already operate independent of which URL is
+  loaded.
+
+**Verification plan**: using 17.1's instrumentation, measure aggregate
+grid decode-FPS/CPU with `sub` vs. today's `main`-everywhere baseline
+on the real DVR (record the result even if the win turns out marginal
+— that's useful information either way); repeated open/close/Prev/Next
+soak test (dozens of cycles) on real client hardware with Chrome's
+memory profiler, confirming no leak from repeated `loadSource()` calls
+and an acceptably brief switch-induced rebuffer; re-run Phase 14's and
+Phase 15.1's existing verification checklists against this changed code
+path, since both now depend on `switchSource` sequencing; confirm
+production-host CPU/network stays healthy with the real
+transcoded/passthrough mix from 17.3.
+
+**Recommended sequencing**: ship 17.1+17.2 first as their own PR, get
+real before/after numbers, then decide 17.3/17.4's scope (possibly
+per-channel, depending on what 17.3a's codec survey finds) as a
+follow-up — 17.3/17.4 carry materially more risk than 17.1/17.2.
+
 ## Non-goals (for now)
 
 - Two-way audio talk-back.
@@ -896,4 +1091,9 @@ Phase 6 is fully done. Phases 14 (focused-stream throttling) and 16
 production (2026-08-10). Phase 15.1 (classical stream enhancement —
 design above) is next up for implementation; 15.2 (ML groundwork) and
 15.3 (`AI` as a real selector option) follow in order, each depending
-on the one before it proving out.
+on the one before it proving out. Phase 17 (browser-side FPS for the
+live grid — design above) is queued behind 15.1: 17.1 (FPS
+instrumentation) and 17.2 (low-risk grid tuning) can start any time;
+17.3 (backend sub-stream prerequisite) and 17.4 (grid switches to
+`sub`) are gated on 17.1/17.2 landing first and on 17.3's real-DVR
+codec/CPU-headroom findings.
