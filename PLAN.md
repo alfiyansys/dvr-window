@@ -766,9 +766,14 @@ confirmed, one real bug found and fixed, two items still blocked.**
   that condition). Different blocker than the 2026-08-10 attempt (that
   one was host resource contention; this one is tab-visibility
   throttling), same outcome: needs a real, foregrounded browser tab, not
-  automation, to finish. `IPCamera 02` (IR-green tinting) is still the
-  right real feed to use for the dark-feed comparison once someone can
-  drive a real tab; a well-lit daytime scene (`Garasi`, moderate
+  automation, to finish. `IPCamera 02` (channel 10) showed the clearest
+  IR-tinting in earlier screenshots but is deliberately deferred as the
+  dark-feed test candidate — it has the worst latency and is physically
+  farthest away of the online channels (`MEMORY.md`), not representative
+  of a typical feed; a nighttime pass on one of the analog channels (or
+  `IPCamera 01`) is the better real-world candidate once it's dark
+  outside, or `IPCamera 02` can still be used later if nothing better is
+  available. A well-lit daytime scene (`Garasi`, moderate
   shadow/highlight range) was checked as best-effort in the meantime and
   showed only a subtle difference, consistent with the classical pass
   targeting genuinely dark/soft footage rather than daytime footage.
