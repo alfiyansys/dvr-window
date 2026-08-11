@@ -75,6 +75,20 @@ void main() {
       // enhancement was already showing, so the caller can swap back to
       // plain <video> (fallback policy: never a broken/blank picture).
       this.onFailure = null;
+      // Set by the caller — invoked once this pipeline has actually drawn
+      // its first real frame from the *currently targeted* video. Needed
+      // because the canvas is a single long-lived element (see class
+      // comment above): right after retarget(), it's still showing
+      // whatever the previous video last rendered into it until a fresh
+      // frame arrives, so the caller must not reveal the canvas (or hide
+      // the <video>) until this fires — otherwise a mode toggle or a new
+      // openOverlay() briefly displays the *previous* channel's picture
+      // under the newly-focused channel's name/controls. Confirmed for
+      // real: opening IPCamera 02 with Classical on, then switching to
+      // Garasi, showed IPCamera 02's last frame in the canvas for one
+      // enhance-render cycle before Garasi's frame arrived.
+      this.onFirstFrame = null;
+      this._firstFrameDone = false;
     }
 
     _compileShader(type, src) {
@@ -141,10 +155,14 @@ void main() {
       }
     }
 
+    // Returns whether a frame was actually drawn, so start()'s loop can
+    // tell a real draw apart from the early-return no-op below (video
+    // metadata not loaded yet) — see onFirstFrame above for why that
+    // distinction matters.
     _renderFrame() {
       const gl = this.gl, video = this.video;
       const w = video.videoWidth, h = video.videoHeight;
-      if (!w || !h) return; // metadata not loaded yet on this burst
+      if (!w || !h) return false; // metadata not loaded yet on this burst
       if (this.canvas.width !== w || this.canvas.height !== h) {
         this.canvas.width = w;
         this.canvas.height = h;
@@ -156,6 +174,7 @@ void main() {
       gl.uniform1i(this.uFrameLoc, 0);
       gl.uniform2f(this.uTexelLoc, 1 / w, 1 / h);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return true;
     }
 
     // Points this already-initialized pipeline at a different video element
@@ -174,15 +193,21 @@ void main() {
       if (this.running) return true;
       if (!this._ensureInit()) return false;
       this.running = true;
+      this._firstFrameDone = false;
       const loop = () => {
         if (!this.running) return;
+        let drew;
         try {
-          this._renderFrame();
+          drew = this._renderFrame();
         } catch (err) {
           console.warn('[enhance] render failed, falling back to plain video:', err);
           this.running = false;
           this.onFailure?.();
           return;
+        }
+        if (drew && !this._firstFrameDone) {
+          this._firstFrameDone = true;
+          this.onFirstFrame?.();
         }
         this.rvfcHandle = this.video.requestVideoFrameCallback(loop);
       };
@@ -245,10 +270,15 @@ void main() {
     const video = document.getElementById('overlaySlot').querySelector('video');
     if (!video) return;
     enhancePipeline.retarget(video);
-    if (enhancePipeline.start()) {
+    // Swap video/canvas visibility only once the pipeline has actually
+    // drawn a real frame from *this* video, not as soon as start() returns
+    // — see onFirstFrame's comment on EnhancementPipeline for why (the
+    // canvas can still be showing a previous channel's last frame here).
+    enhancePipeline.onFirstFrame = () => {
       video.style.display = 'none';
       document.getElementById('enhanceCanvas').style.display = 'block';
-    }
+    };
+    enhancePipeline.start();
   }
 
   document.getElementById('overlayEnhance').onclick = () => {

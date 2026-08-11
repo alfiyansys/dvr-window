@@ -718,23 +718,60 @@ hardware, not just reasoned about):
   the newly-focused channel's video with no stale frame or leaked
   WebGL context from the previous one.
 
-**Status (2026-08-10): implemented, not fully verified — none of the
-four items above are confirmed yet.** What has been confirmed so far:
-the pipeline runs and renders correctly (including the vertical-flip
-fix caught by the user testing it directly), the `Off`/`Classical`
-toggle works and persists across reloads, and no console errors or
-regressions from the `enhance.js`/CSS extraction. A same-day attempt to
-work through the four checklist items above was blocked by real host
-resource contention (system briefly had well under 1GB free RAM, load
-average 7+) making the browser-automation tab crash repeatedly and
-streams take minutes to connect instead of seconds — confirmed
-server-side (mediamtx paths/ffmpeg) stayed healthy throughout, so this
-was purely local resource pressure, not a code issue. Freeing memory
-partially helped but didn't fully resolve it within the session.
-Resume the checklist once the environment is stable; the dark-feed
-comparison in particular still needs a genuinely dark/IR-lit real feed
-(e.g. `IPCamera 02`, which showed IR-green tinting in earlier
-screenshots) rather than the daytime footage tested so far.
+**Status (2026-08-11): implemented, two of four checklist items now
+confirmed, one real bug found and fixed, two items still blocked.**
+
+- **Bug found and fixed**: retargeting the enhancement pipeline to a
+  different video (mode toggle, or opening/closing/Prev-Next between
+  channels) could briefly show the *previous* channel's last rendered
+  frame under the newly-focused channel's name — `applyEnhancement()`
+  used to flip `canvas.style.display = 'block'` as soon as
+  `pipeline.start()` returned, but the canvas is a single long-lived
+  element (by design, see its class comment) that still holds whatever
+  the previous video last drew into it until a fresh frame actually
+  arrives. Confirmed for real via a scripted repro (primed the canvas
+  with IPCamera 02's content, then opened Garasi and read the canvas
+  pixels in the very next tick, before any new frame could have
+  rendered — identical to the stale IPCamera 02 frame). Fixed in
+  `static/enhance.js`: `EnhancementPipeline` now takes an `onFirstFrame`
+  callback, fired only once `_renderFrame()` has actually drawn a real
+  frame from the *currently targeted* video; `applyEnhancement()` defers
+  the video/canvas visibility swap to that callback instead of doing it
+  eagerly, so the plain `<video>` (always correct, just unenhanced)
+  stays visible until the enhanced picture is verifiably ready. Re-ran
+  the same scripted repro against the fix: canvas never shows nor holds
+  stale content anymore. This is the mechanism the "no stale frame ...
+  from the previous one" checklist item below was worried about — it
+  turned out to apply to every retarget, not just Prev/Next.
+- **Confirmed**: selector persists across a page reload (`enhanceMode`
+  in `localStorage`, survives navigation as expected).
+- **Confirmed**: WebGL2-unavailable fallback, tested via a real
+  capability gap (temporarily made `canvas.getContext('webgl2')` return
+  `null`, matching what `enhanceCapable()`'s own probe checks) — 
+  enhancement silently stays off, plain `<video>` stays visible, no
+  console errors. (First attempt at this test gave a false failure
+  because the modal was left open from a prior check — closing it first
+  before re-testing gave the correct, clean result on retest.)
+- **Still blocked**, this time by the verification environment rather
+  than the app: confirming the classical pass visibly improves a
+  dark/soft real feed, and confirming zero measurable impact on the
+  grid's other 5 cells, both need real-time video decode/paint to
+  actually happen, and the browser-automation tab used this session
+  ran with `document.visibilityState` permanently `"hidden"` — a
+  polled `video.currentTime` sat frozen for 20+ continuous seconds with
+  `paused: true` the whole time, even though isolated screenshots taken
+  minutes apart did show fresh content (Chrome forces a paint for a
+  screenshot even on a backgrounded tab, but `requestVideoFrameCallback`
+  — what the whole enhancement pipeline is driven by — never fires under
+  that condition). Different blocker than the 2026-08-10 attempt (that
+  one was host resource contention; this one is tab-visibility
+  throttling), same outcome: needs a real, foregrounded browser tab, not
+  automation, to finish. `IPCamera 02` (IR-green tinting) is still the
+  right real feed to use for the dark-feed comparison once someone can
+  drive a real tab; a well-lit daytime scene (`Garasi`, moderate
+  shadow/highlight range) was checked as best-effort in the meantime and
+  showed only a subtle difference, consistent with the classical pass
+  targeting genuinely dark/soft footage rather than daytime footage.
 
 ## Phase 15.2 design: ML groundwork for stream enhancement (dev-only, not yet user-facing)
 
