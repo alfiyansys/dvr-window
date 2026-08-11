@@ -706,8 +706,24 @@ in a loop.
 hardware, not just reasoned about):
 
 - Confirm the classical pass visibly improves at least one genuinely
-  dark/soft real feed from this DVR (before/after screenshots), not
-  just that the shader compiles.
+  dark/soft real feed from this DVR, not just that the shader compiles.
+  Prefer measuring this objectively over eyeballing before/after
+  screenshots: capture a raw frame from the stream (ffmpeg snapshot, or
+  the app's own Snapshot button) and run the *same* GLSL math (auto-levels/
+  gamma + unsharp mask, `static/enhance.js`'s `ENHANCE_FRAGMENT_SRC`) as a
+  small Python/numpy script against it, rather than trying to align two
+  separately-captured screenshots — this gives a byte-comparable "what the
+  shader should produce" reference. Then compute before/after numbers:
+  histogram black/white-point spread (did auto-levels actually widen the
+  dynamic range), luminance std dev (contrast), and Laplacian variance
+  (sharpness — confirms the unsharp mask added edge energy without
+  tipping into halos). These metrics confirm the pixels moved in the
+  intended direction but won't catch blown highlights or unnatural
+  sharpening artifacts on their own — pair them with one quick visual
+  check, not a substitute for it. Worth writing as a small reusable
+  script (raw frame in, both sets of metrics + a diff image out) rather
+  than a one-off check, since future dark-feed regressions (15.2/15.3)
+  will want the same comparison.
 - Confirm zero measurable impact on the grid's other 5 cells or
   Phase 14's throttling behavior while enhancement runs in the modal.
 - Confirm the selector persists across a page reload and correctly
