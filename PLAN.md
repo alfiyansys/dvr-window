@@ -718,8 +718,8 @@ hardware, not just reasoned about):
   the newly-focused channel's video with no stale frame or leaked
   WebGL context from the previous one.
 
-**Status (2026-08-11): implemented, two of four checklist items now
-confirmed, one real bug found and fixed, two items still blocked.**
+**Status (2026-08-11): implemented, three of four checklist items now
+confirmed, one real bug found and fixed, one item still blocked.**
 
 - **Bug found and fixed**: retargeting the enhancement pipeline to a
   different video (mode toggle, or opening/closing/Prev-Next between
@@ -752,31 +752,53 @@ confirmed, one real bug found and fixed, two items still blocked.**
   console errors. (First attempt at this test gave a false failure
   because the modal was left open from a prior check — closing it first
   before re-testing gave the correct, clean result on retest.)
+- **Confirmed**: zero measurable impact on the grid's other 5 cells or
+  Phase 14's throttling while enhancement runs in the modal — verified
+  with a single atomic, precisely-timestamped `XMLHttpRequest`
+  instrumentation script (not the separate-tool-call polling used in an
+  earlier, misleading attempt — see note below) spanning 26 real seconds:
+  opened Teras (ch1) via the real `openOverlay()` flow with Classical
+  enhancement active, and simultaneously logged every request to both
+  ch1 and a background cell (ch2/Car Port). Result: ch1 sustained a
+  steady, undisturbed ~4 req/s the entire window (enhancement adds no
+  network activity of its own — expected, since it's pure client-side
+  WebGL2 rendering); ch2 correctly duty-cycled — silent for ~10s, a
+  ~2s burst of requests, repeating on schedule twice in the window,
+  matching `BG_OFF_MS`/`BG_ON_MS` exactly. An earlier attempt at this
+  same check (using separate `read_network_requests` tool calls with
+  `clear`/wait/`check` as distinct steps) gave a false "throttling isn't
+  working, cells fetch continuously" result — traced to the tool calls
+  themselves having unknown, uncontrolled latency between them, not a
+  real bug; the atomic in-page script above is the trustworthy version
+  and fully vindicates Phase 14's mechanism.
 - **Still blocked**, this time by the verification environment rather
   than the app: confirming the classical pass visibly improves a
-  dark/soft real feed, and confirming zero measurable impact on the
-  grid's other 5 cells, both need real-time video decode/paint to
-  actually happen, and the browser-automation tab used this session
-  ran with `document.visibilityState` permanently `"hidden"` — a
-  polled `video.currentTime` sat frozen for 20+ continuous seconds with
-  `paused: true` the whole time, even though isolated screenshots taken
-  minutes apart did show fresh content (Chrome forces a paint for a
-  screenshot even on a backgrounded tab, but `requestVideoFrameCallback`
-  — what the whole enhancement pipeline is driven by — never fires under
-  that condition). Different blocker than the 2026-08-10 attempt (that
-  one was host resource contention; this one is tab-visibility
-  throttling), same outcome: needs a real, foregrounded browser tab, not
-  automation, to finish. `IPCamera 02` (channel 10) showed the clearest
-  IR-tinting in earlier screenshots but is deliberately deferred as the
-  dark-feed test candidate — it has the worst latency and is physically
-  farthest away of the online channels (`MEMORY.md`), not representative
-  of a typical feed; a nighttime pass on one of the analog channels (or
-  `IPCamera 01`) is the better real-world candidate once it's dark
-  outside, or `IPCamera 02` can still be used later if nothing better is
-  available. A well-lit daytime scene (`Garasi`, moderate
-  shadow/highlight range) was checked as best-effort in the meantime and
-  showed only a subtle difference, consistent with the classical pass
-  targeting genuinely dark/soft footage rather than daytime footage.
+  dark/soft real feed needs an actual decoded video frame to sample, and
+  this session's browser-automation tab cannot produce one under any
+  approach tried — `requestVideoFrameCallback` never fires
+  (`document.visibilityState` stuck `"hidden"`; a polled
+  `video.currentTime` sat frozen for 20+ continuous seconds), and even a
+  direct one-shot `texImage2D` snapshot (which shouldn't need rVFC,
+  just a decoded frame) found every grid-cell video stuck at
+  `readyState: 0` with zero dimensions — confirmed this isn't
+  session/resource degradation by testing in a brand-new tab, which
+  showed the identical `readyState: 0`. (One channel did briefly show a
+  real decoded frame — `readyState: 4`, 1280×720 — right at the very
+  start of this verification session; that appears to have been a
+  one-time fluke, not a reproducible state, since nothing since has
+  matched it.) Different blocker than the 2026-08-10 attempt (that one
+  was host resource contention), same outcome: needs a real,
+  foregrounded browser tab, not automation, to finish. `IPCamera 02`
+  (channel 10) showed the clearest IR-tinting in earlier screenshots but
+  is deliberately deferred as the dark-feed test candidate — it has the
+  worst latency and is physically farthest away of the online channels
+  (`MEMORY.md`), not representative of a typical feed; a nighttime pass
+  on one of the analog channels (or `IPCamera 01`) is the better
+  real-world candidate — conveniently, it's now dusk locally, so this is
+  a good time to check. A well-lit daytime scene (`Garasi`) was checked
+  as best-effort earlier in the session and showed only a subtle
+  difference, consistent with the classical pass targeting genuinely
+  dark/soft footage rather than daytime footage.
 
 ## Phase 15.2 design: ML groundwork for stream enhancement (dev-only, not yet user-facing)
 
