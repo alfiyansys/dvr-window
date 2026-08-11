@@ -1,0 +1,685 @@
+let overlayChannelId = null;
+
+// The grid cell's own .status span is the single source of truth for a
+// channel's live/reconnecting/error state (setupHlsPlayer only ever
+// writes there — see below). The overlay doesn't move that span into
+// itself the way it moves <video>, so mirror it into #overlayStatus via
+// a MutationObserver rather than threading channel state through
+// setupHlsPlayer, which has no idea an overlay exists.
+let overlayStatusObserver = null;
+
+function syncOverlayStatus(cell) {
+  const overlayStatus = document.getElementById('overlayStatus');
+  const cellStatus = cell.querySelector('.status');
+  const copy = () => {
+    overlayStatus.textContent = cellStatus.textContent;
+    overlayStatus.className = cellStatus.className;
+  };
+  copy();
+  if (overlayStatusObserver) overlayStatusObserver.disconnect();
+  overlayStatusObserver = new MutationObserver(copy);
+  overlayStatusObserver.observe(cellStatus, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+}
+
+// Same mirroring approach as syncOverlayStatus above, for the cell's
+// .ping span (written by pingLoop() below) — no class ever changes on
+// it, so only childList/characterData need watching, not attributes.
+let overlayPingObserver = null;
+
+function syncOverlayPing(cell) {
+  const overlayPing = document.getElementById('overlayPing');
+  const cellPing = cell.querySelector('.ping');
+  const copy = () => { overlayPing.textContent = cellPing.textContent; };
+  copy();
+  if (overlayPingObserver) overlayPingObserver.disconnect();
+  overlayPingObserver = new MutationObserver(copy);
+  overlayPingObserver.observe(cellPing, { childList: true, characterData: true, subtree: true });
+}
+
+// Phase 14: give the focused cell's player full speed back and duty-cycle
+// every other cell's — see PLAN.md "Phase 14 design". `video._player` is
+// only set once setupHlsPlayer's start() has run for that cell, hence the
+// optional chaining (a cell whose player hasn't initialized yet has
+// nothing to throttle/restore regardless).
+function throttleOtherCells(exceptCell) {
+  for (const other of document.querySelectorAll('#grid .cell')) {
+    if (other === exceptCell) continue;
+    other.querySelector('video')?._player?.throttleBackground();
+  }
+}
+
+function restoreAllCells() {
+  for (const other of document.querySelectorAll('#grid .cell')) {
+    other.querySelector('video')?._player?.restoreForeground();
+  }
+}
+
+// Phase 15.1 classical enhancement lives in static/enhance.js (loaded
+// below) — applyEnhancement()/stopEnhancement() are its exported globals,
+// same pattern static/auth.js already uses for authFetch/ensureAuthKey.
+
+function openOverlay(cell, name, channelId, ptzEnabled) {
+  const slot = document.getElementById('overlaySlot');
+  const video = cell.querySelector('video');
+  cell.dataset.videoHome = '1';
+  video._homeCell = cell;
+  slot.appendChild(video);
+  video._player?.restoreForeground();
+  throttleOtherCells(cell);
+  document.getElementById('overlayName').textContent = name;
+  syncOverlayStatus(cell);
+  syncOverlayPing(cell);
+  overlayChannelId = channelId;
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('ptzPad').classList.toggle('open', !!ptzEnabled);
+  document.getElementById('ptzZoom').style.display = ptzEnabled ? 'flex' : 'none';
+  applyEnhancement(); // Phase 15.1 - targets whichever video is now in the slot
+}
+
+// PTZ is continuous-move: hold to move, release to stop (see
+// ARCHITECTURE.md "PTZ for IP-proxy channels" — only pan-right was
+// physically confirmed to move the camera; other directions follow the
+// same documented ISAPI sign convention but aren't independently verified).
+function ptzSend(pan, tilt, zoom) {
+  if (overlayChannelId == null) return;
+  authFetch(`/api/ptz/${overlayChannelId}/continuous`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pan, tilt, zoom }),
+  });
+}
+
+function ptzStop() {
+  if (overlayChannelId == null) return;
+  authFetch(`/api/ptz/${overlayChannelId}/stop`, { method: 'PUT' });
+}
+
+for (const btn of document.querySelectorAll('#ptzPad button')) {
+  const pan = Number(btn.dataset.pan);
+  const tilt = Number(btn.dataset.tilt);
+  btn.addEventListener('pointerdown', () => ptzSend(pan, tilt, 0));
+  btn.addEventListener('pointerup', ptzStop);
+  btn.addEventListener('pointerleave', ptzStop);
+}
+for (const btn of document.querySelectorAll('#ptzZoom button')) {
+  const zoom = Number(btn.dataset.zoom);
+  btn.addEventListener('pointerdown', () => ptzSend(0, 0, zoom));
+  btn.addEventListener('pointerup', ptzStop);
+  btn.addEventListener('pointerleave', ptzStop);
+}
+
+document.getElementById('overlaySnapshot').onclick = async () => {
+  if (overlayChannelId == null) return;
+  // A plain <a href> can't carry the X-Auth-Key header the /api/*
+  // middleware now requires, so fetch as a blob and download that instead.
+  const res = await authFetch(`/api/snapshot?channelId=${overlayChannelId}`);
+  if (!res.ok) return;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `snapshot_ch${overlayChannelId}_${Date.now()}.jpg`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+document.getElementById('overlayPlayback').onclick = () => {
+  if (overlayChannelId == null) return;
+  location.href = `/playback?channelId=${overlayChannelId}`;
+};
+
+function returnSlottedVideoHome() {
+  const slot = document.getElementById('overlaySlot');
+  const video = slot.querySelector('video');
+  if (video && video._homeCell) {
+    video._homeCell.insertBefore(video, video._homeCell.firstChild);
+  }
+}
+
+// Standard Fullscreen API, with the -webkit- prefixed names old
+// Safari still needs (no vendor-neutral fallback for iOS Safari,
+// which only exposes video-only webkitEnterFullscreen — accepted
+// limitation, not handled here).
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function toggleFullscreen() {
+  const box = document.querySelector('.overlay-box');
+  if (!isFullscreen()) {
+    (box.requestFullscreen || box.webkitRequestFullscreen)?.call(box);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  }
+}
+
+function updateFullscreenButton() {
+  document.getElementById('overlayFullscreen').textContent = isFullscreen() ? 'Exit Fullscreen ⛶' : 'Fullscreen ⛶';
+}
+document.addEventListener('fullscreenchange', updateFullscreenButton);
+document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
+document.getElementById('overlayFullscreen').onclick = toggleFullscreen;
+
+function closeOverlay() {
+  if (isFullscreen()) (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  // Phase 15.1 - before returnSlottedVideoHome(), so the video's inline
+  // display style (set by applyEnhancement() while enhancement was
+  // running) is cleared before it's reparented back into the grid cell.
+  stopEnhancement();
+  returnSlottedVideoHome();
+  restoreAllCells();
+  ptzStop();
+  if (overlayStatusObserver) { overlayStatusObserver.disconnect(); overlayStatusObserver = null; }
+  if (overlayPingObserver) { overlayPingObserver.disconnect(); overlayPingObserver = null; }
+  document.getElementById('overlay').classList.remove('open');
+}
+
+// Cycles to the adjacent camera in grid order without closing the
+// overlay — wraps around at either end. Reads channel metadata off the
+// cell's own dataset (set in main() below) rather than re-fetching,
+// since these buttons have no closure over the clicked cell the way
+// openOverlay's caller does.
+function showAdjacent(step) {
+  if (overlayChannelId == null) return;
+  const cells = Array.from(document.querySelectorAll('#grid .cell'));
+  if (cells.length < 2) return;
+  const currentIndex = cells.findIndex(c => Number(c.dataset.channelId) === overlayChannelId);
+  if (currentIndex === -1) return;
+  const next = cells[(currentIndex + step + cells.length) % cells.length];
+  ptzStop();
+  // Phase 15.1 - same ordering reason as closeOverlay(): reset the
+  // outgoing video's display style before it goes back to the grid.
+  // openOverlay() re-applies enhancement to the incoming video itself.
+  stopEnhancement();
+  returnSlottedVideoHome();
+  openOverlay(next, next.dataset.name, Number(next.dataset.channelId), next.dataset.ptzEnabled === 'true');
+}
+const showNext = () => showAdjacent(1);
+const showPrev = () => showAdjacent(-1);
+
+document.getElementById('overlayNext').onclick = showNext;
+document.getElementById('overlayPrev').onclick = showPrev;
+document.getElementById('overlayClose').onclick = closeOverlay;
+document.getElementById('overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'overlay') closeOverlay();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeOverlay();
+  if (!document.getElementById('overlay').classList.contains('open')) return;
+  if (e.key === 'ArrowRight') showNext();
+  if (e.key === 'ArrowLeft') showPrev();
+});
+
+// Owns one cell's video + status label across however many reconnects
+// it takes, so a stream error doesn't leave the feed dead until a
+// manual page reload. hls.js's own docs distinguish network vs. media
+// errors as separately recoverable in place (startLoad/
+// recoverMediaError); anything else fatal gets a full instance
+// rebuild behind a backoff (2s, doubling, capped at 30s, reset on the
+// next successful MANIFEST_PARSED) so a rebooting DVR doesn't get
+// hammered at full speed. `video` is the same DOM node throughout even
+// after openOverlay() relocates it into #overlaySlot, since that's a
+// move (appendChild), not a clone — so this instance stays valid there.
+function setupHlsPlayer(video, status, hlsUrl) {
+  const RETRY_MS_INITIAL = 2000;
+  const RETRY_MS_MAX = 30000;
+  let retryMs = RETRY_MS_INITIAL;
+  let retryTimer = null;
+  let hls = null;
+  // Counts fatal errors since the last successful MANIFEST_PARSED.
+  // hls.js's startLoad()/recoverMediaError() fix a transient hiccup in
+  // place, but confirmed against a real outage (killed mediamtx for
+  // ~90s, then resumed it): if mediamtx tore down the HLS muxer session
+  // while it was down, startLoad() alone keeps retrying the same
+  // now-dead session id forever and gets a permanent 401 — it never
+  // re-requests the manifest to pick up a fresh session. So only the
+  // *first* fatal error of a given kind gets the cheap in-place fix;
+  // any fatal error after that (the in-place fix demonstrably didn't
+  // work) escalates to a full instance rebuild, which does re-fetch the
+  // manifest from scratch.
+  let consecutiveErrors = 0;
+  // Set instead of immediately rebuilding when a fatal error escalates
+  // past the cheap in-place fixes while backgrounded — see the
+  // Hls.Events.ERROR handler in start() for why the rebuild itself has
+  // to wait for restoreForeground() rather than running right away.
+  let pendingRebuild = false;
+
+  function setStatus(text, cls) {
+    status.textContent = text;
+    status.className = `status ${cls}`;
+  }
+
+  function scheduleRestart() {
+    // Phase 14: don't relabel an intentionally-throttled cell as broken -
+    // see the Hls.Events.ERROR handler in start() for why this can fire
+    // while backgrounded at all.
+    if (!backgrounded) setStatus('reconnecting…', 'loading');
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => {
+      retryMs = Math.min(retryMs * 2, RETRY_MS_MAX);
+      start();
+    }, retryMs);
+  }
+
+  // A stream can be "connected" with no fatal hls.js error yet still
+  // useless — a DVR-side encoder hiccup or a slow upstream link can
+  // stall decoded frames without hls.js's own buffer/network logic
+  // ever calling it fatal, so the ERROR handler below never fires.
+  // video.currentTime not advancing is the actual ground truth for
+  // "is this frame stuck", regardless of what hls.js/the network layer
+  // thinks. Implemented as two chained one-shot timers reset on every
+  // `timeupdate` rather than a polling loop — costs nothing while the
+  // stream is healthy (timeupdate fires that often on its own), and
+  // only does anything once playback has actually gone quiet.
+  //
+  // Thresholds deliberately generous: some channels here (the IP-proxy
+  // cameras) reach the DVR over a multi-hop wireless link, not a wired
+  // one, so multi-second jitter/dropout is normal and often self-heals
+  // — confirmed against this deployment's own ffmpeg transcode log
+  // (dup=/drop= counters climbing under load without the stream ever
+  // fully dying). Rebuilding the local HLS pipeline doesn't fix a slow
+  // upstream wireless hop anyway, so escalating to a rebuild too
+  // eagerly would just add local churn on top of an already-strained
+  // link instead of helping. A genuinely dead stream is still caught —
+  // just after a longer, less trigger-happy grace period.
+  const LAG_STATUS_MS = 10000;
+  const LAG_REBUILD_MS = 15000;
+  let lagStatusTimer = null;
+  let lagRebuildTimer = null;
+
+  function clearLagTimers() {
+    clearTimeout(lagStatusTimer); lagStatusTimer = null;
+    clearTimeout(lagRebuildTimer); lagRebuildTimer = null;
+  }
+
+  // A second, different failure mode from the frozen-frame one above:
+  // currentTime can be genuinely *advancing* (so the watchdog above never
+  // fires) while playback is stuck well behind the live edge — confirmed
+  // for real via a screenshot showing "live" with the DVR's own on-screen
+  // timestamp ~26 minutes stale. Most likely trigger is tab backgrounding
+  // (Chrome throttles decode hard on hidden tabs; resuming just continues
+  // from wherever it stalled instead of catching up) but this check isn't
+  // backgrounding-specific — it catches any cause of sustained drift. See
+  // PLAN.md "Phase 12 design".
+  //
+  // Threshold generous for the same reason as LAG_STATUS_MS above: the
+  // multi-hop-wireless channels see real multi-second jitter under normal
+  // conditions, and lowLatencyMode's own target latency isn't zero either
+  // — 20s of drift is well past either of those, not a false-positive risk.
+  const DRIFT_THRESHOLD_S = 20;
+  const DRIFT_STATUS_MS = 10000;
+  const DRIFT_REBUILD_MS = 15000;
+  let driftSinceMs = null;
+
+  // Piggybacks on the existing `timeupdate` handler below rather than a
+  // separate polling interval — it already fires often enough on its own
+  // while the stream is healthy, matching this file's existing "costs
+  // nothing while healthy" reasoning for the frozen-frame watchdog.
+  function checkDrift() {
+    // Same reasoning as the armLagWatchdog guard below — currentTime is
+    // *expected* to be behind the live edge during a deliberate Phase 14
+    // duty-cycle pause, that's not real drift to escalate.
+    if (backgrounded) {
+      driftSinceMs = null;
+      return false;
+    }
+    if (!hls || hls.liveSyncPosition == null || !Number.isFinite(hls.liveSyncPosition)) {
+      driftSinceMs = null;
+      return false;
+    }
+    const behindS = hls.liveSyncPosition - video.currentTime;
+    if (behindS < DRIFT_THRESHOLD_S) {
+      driftSinceMs = null;
+      return false;
+    }
+    if (driftSinceMs == null) driftSinceMs = Date.now();
+    return true;
+  }
+
+  // Snaps back to the live edge immediately on tab foreground instead of
+  // waiting on hls.js's own gradual low-latency catchup (confirmed this
+  // does eventually happen on its own, just not promptly — see PLAN.md).
+  function seekToLiveEdge() {
+    if (hls && hls.liveSyncPosition != null && Number.isFinite(hls.liveSyncPosition)) {
+      video.currentTime = hls.liveSyncPosition;
+    }
+  }
+
+  // Phase 14: while a *different* cell's modal is focused, this cell
+  // duty-cycles instead of running full-speed (bandwidth/CPU contention
+  // with the focused stream) or fully freezing (a dead thumbnail) — see
+  // PLAN.md "Phase 14 design". stopLoad()/pause() halt new segment
+  // fetches and decode immediately; a chained one-shot-timer cycle (same
+  // style as the lag watchdog above, not setInterval) briefly resumes for
+  // BG_ON_MS every BG_OFF_MS to pull a fresh frame or two before pausing
+  // again. hls stays null on the native-Safari fallback path, so bgOn/
+  // bgOff only pause/play the <video> itself there — still cuts its
+  // segment fetching, just via the browser's own native HLS engine
+  // instead of hls.js.
+  const BG_OFF_MS = 10000;
+  const BG_ON_MS = 2000;
+  let backgrounded = false;
+  let bgTimer = null;
+  let bgBurstTimer = null;
+
+  function clearBgTimers() {
+    clearTimeout(bgTimer); bgTimer = null;
+    clearTimeout(bgBurstTimer); bgBurstTimer = null;
+  }
+
+  function bgOff() {
+    if (hls) hls.stopLoad();
+    video.pause();
+  }
+
+  function bgOn() {
+    if (hls) hls.startLoad();
+    video.play().catch(() => {});
+  }
+
+  function scheduleBgCycle() {
+    bgTimer = setTimeout(() => {
+      if (!backgrounded) return;
+      bgOn();
+      bgBurstTimer = setTimeout(() => {
+        if (!backgrounded) return;
+        bgOff();
+        scheduleBgCycle();
+      }, BG_ON_MS);
+    }, BG_OFF_MS);
+  }
+
+  function throttleBackground() {
+    if (backgrounded) return;
+    backgrounded = true;
+    // A lag-watchdog timer armed just before backgrounding began (e.g.
+    // from the last timeupdate a moment ago) is still mid-countdown here
+    // - the `backgrounded` guards in armLagWatchdog()/playing/timeupdate
+    // only stop it from being *re*-armed, they don't cancel one already
+    // ticking. Left alone, confirmed against the real DVR: it still
+    // fires setStatus('lagging…') and then, LAG_REBUILD_MS later,
+    // hls.destroy()+scheduleRestart() - a full unwanted teardown of a
+    // stream that was only ever intentionally paused, plus its own
+    // unguarded setStatus('reconnecting…'). Same cancellation the
+    // visibilitychange-hidden branch already does for the same reason.
+    clearLagTimers();
+    clearBgTimers();
+    bgOff();
+    scheduleBgCycle();
+  }
+
+  function restoreForeground() {
+    if (!backgrounded) return;
+    backgrounded = false;
+    clearBgTimers();
+    if (pendingRebuild) {
+      // A fatal error escalated past the cheap in-place fixes while this
+      // cell was backgrounded (see the ERROR handler in start()) - do the
+      // actual rebuild now, right as the cell is about to be looked at
+      // again, instead of however many duty cycles ago it first failed.
+      pendingRebuild = false;
+      consecutiveErrors = 0;
+      start();
+    } else {
+      bgOn();
+    }
+    // Belt-and-suspenders against a stale reconnecting…/error label
+    // leaking through despite the Hls.Events.ERROR guard above - reassert
+    // live and restart the watchdog immediately rather than waiting on
+    // the next playing/timeupdate event to correct it. Harmless if the
+    // stream was already fine (the next real event just confirms it
+    // again); a genuinely broken stream still gets caught quickly by the
+    // now-unguarded (backgrounded is false again) watchdog/error paths.
+    setStatus('live', 'ok');
+    armLagWatchdog();
+  }
+
+  function armLagWatchdog() {
+    clearLagTimers();
+    // Backgrounded tabs get their rendering/decoding throttled by the
+    // browser itself, which looks identical to a real stall — don't
+    // even start the countdown while hidden (see visibilitychange
+    // listener below, which re-arms with a fresh window on return).
+    if (document.visibilityState !== 'visible') return;
+    // Same reasoning for our own deliberate duty-cycle pauses (above) —
+    // the lag/drift watchdogs exist to catch and escalate an
+    // *unintentional* stall, and would otherwise "fix" this intentional
+    // one every single off-cycle, defeating the point.
+    if (backgrounded) return;
+    lagStatusTimer = setTimeout(() => {
+      setStatus('lagging…', 'loading');
+      lagRebuildTimer = setTimeout(() => {
+        if (hls) { hls.destroy(); hls = null; }
+        scheduleRestart();
+      }, LAG_REBUILD_MS);
+    }, LAG_STATUS_MS);
+  }
+
+  function start() {
+    clearLagTimers();
+    driftSinceMs = null;
+    if (Hls.isSupported()) {
+      if (hls) hls.destroy();
+      hls = new Hls({ lowLatencyMode: true, xhrSetup: hlsXhrSetup });
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(video);
+      // Phase 14: a rebuild triggered while backgrounded (from the
+      // ERROR handler below, or scheduleRestart() via the lag watchdog)
+      // would otherwise start loading/playing at full speed until the
+      // next scheduled duty-cycle boundary - immediately re-pause to
+      // match whatever phase the duty cycle is currently in instead.
+      if (backgrounded) bgOff();
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { retryMs = RETRY_MS_INITIAL; consecutiveErrors = 0; });
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal) return;
+        clearLagTimers();
+        // Phase 14's own stopLoad()/startLoad() duty-cycling can itself
+        // trigger a fatal error here (confirmed against the real DVR:
+        // mediamtx tearing down the muxer/on-demand source mid-off-phase).
+        // That's not something to alarm the user about - see the
+        // backgrounded guard on the playing/timeupdate handlers below for
+        // the same reasoning - but the cheap in-place fixes below still
+        // need to run regardless of backgrounded. An earlier version of
+        // this fix no-op'd entirely while backgrounded instead of just
+        // suppressing the label; that was wrong - confirmed against the
+        // real DVR that repeated fatal errors with zero recovery attempts
+        // eventually leaves hls's underlying MediaSource permanently
+        // stuck, which is worse than a wrong status label. So: always run
+        // startLoad()/recoverMediaError(), just skip the label while
+        // backgrounded.
+        consecutiveErrors++;
+        if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          if (!backgrounded) setStatus('reconnecting…', 'loading');
+          hls.startLoad();
+          return;
+        }
+        if (consecutiveErrors === 1 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          if (!backgrounded) setStatus('reconnecting…', 'loading');
+          hls.recoverMediaError();
+          return;
+        }
+        // Escalating past here means a full rebuild: destroy the current
+        // hls instance and attachMedia() a fresh one, which blanks the
+        // video to black until the new instance has buffered enough to
+        // render again (a fresh MediaSource starts with zero data,
+        // unlike startLoad()/recoverMediaError() above which keep the
+        // existing one). Reported by the user in real use: background
+        // cells going visibly black during a modal session, still black
+        // for a moment after closing it - matches doing this rebuild
+        // immediately while backgrounded, since a freshly-rebuilt
+        // instance only gets BG_ON_MS (2s) per duty cycle to load
+        // anything before being paused again, often not enough for even
+        // one frame to render. Nobody's watching a backgrounded cell
+        // anyway, so defer the actual rebuild to restoreForeground()
+        // instead - the stale instance just sits there showing its last
+        // good frame (frozen, not black) until then.
+        if (backgrounded) {
+          pendingRebuild = true;
+          return;
+        }
+        setStatus('error', 'err');
+        hls.destroy();
+        hls = null;
+        scheduleRestart();
+      });
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = hlsUrl;
+    } else {
+      setStatus('HLS not supported', 'err');
+    }
+  }
+
+  // "live" is only trustworthy once frames are actually rendering —
+  // MANIFEST_PARSED (or, on the Safari-native path, loadedmetadata)
+  // fires well before that, so setting "live" there was a lie the lag
+  // watchdog couldn't tell apart from the real thing: confirmed for
+  // real on channel 9/10 (multi-hop wireless), where a rebuild landed
+  // MANIFEST_PARSED with the manifest structure in place but zero
+  // actual media flowing yet, and the grid showed "live" for a
+  // stalled video (paused=true, currentTime stuck at 0) until the lag
+  // watchdog eventually caught up. `playing` — standard, fires
+  // identically whether hls.js or native HLS is driving the element —
+  // is the actual "frames are flowing" signal, so that's the one
+  // place "live" gets set from here on.
+  video.addEventListener('playing', () => {
+    // Also fires for our own Phase 14 duty-cycle resumes (bgOn) — leave
+    // the status label as whatever it last said rather than reasserting
+    // "live" from a deliberately throttled burst; the stream is fine,
+    // just intentionally deprioritized, not something to relabel.
+    if (backgrounded) return;
+    setStatus('live', 'ok');
+    armLagWatchdog();
+  });
+  // currentTime actually advancing is the ground truth for "still
+  // playing fine" regardless of what hls.js/network state says, so
+  // reassert "live" on every timeupdate too — not just re-arm the
+  // watchdog — or a stream that stutters (keeps progressing, just
+  // slower than LAG_STATUS_MS) would get stuck showing "lagging…"
+  // forever: each fresh timeupdate would cancel the pending escalation
+  // without ever reverting the label. Confirmed this happens for real
+  // against channel 9/10's H.265->H.264 transcode, which genuinely
+  // drops/duplicates frames under load (see ffmpeg's own `dup=`/
+  // `drop=` counters in the run.sh log) without ever fully stalling.
+  video.addEventListener('timeupdate', () => {
+    // Same as the 'playing' guard above — a Phase 14 duty-cycle burst
+    // fires real timeupdate events too, but shouldn't touch the status
+    // label or re-arm/escalate anything.
+    if (backgrounded) return;
+    // Frames advancing doesn't necessarily mean "live" — checkDrift()
+    // catches the case where they're advancing from well behind the live
+    // edge (see PLAN.md "Phase 12 design"). Still calling armLagWatchdog()
+    // either way: frames genuinely are moving, so the frozen-frame
+    // watchdog above should stay reset regardless of drift status.
+    armLagWatchdog();
+    if (checkDrift()) {
+      const driftingForMs = Date.now() - driftSinceMs;
+      if (driftingForMs >= DRIFT_STATUS_MS + DRIFT_REBUILD_MS) {
+        if (hls) { hls.destroy(); hls = null; }
+        scheduleRestart();
+        return;
+      }
+      if (driftingForMs >= DRIFT_STATUS_MS) {
+        setStatus('lagging…', 'loading');
+        return;
+      }
+    }
+    setStatus('live', 'ok');
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      seekToLiveEdge();
+      driftSinceMs = null;
+      armLagWatchdog();
+    } else {
+      clearLagTimers();
+    }
+  });
+
+  // The native-Safari fallback path has no hls.js to hook for
+  // recoverable-vs-fatal errors, so any video error just retries the
+  // whole thing behind the same backoff. Attached once, outside
+  // start(), so repeated restarts don't stack duplicate listeners.
+  if (!Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.addEventListener('loadedmetadata', () => { retryMs = RETRY_MS_INITIAL; });
+    video.addEventListener('error', () => {
+      clearLagTimers();
+      // Same reasoning as the hls.js ERROR handler in start() - reassigning
+      // video.src (what a restart ultimately does on this path) blanks the
+      // video until it reloads, so defer it to restoreForeground() while
+      // backgrounded instead of leaving the cell visibly black in the
+      // meantime for however long it takes to reconnect.
+      if (backgrounded) {
+        pendingRebuild = true;
+        return;
+      }
+      setStatus('error', 'err');
+      scheduleRestart();
+    });
+  }
+
+  // Exposed so openOverlay/closeOverlay/showAdjacent (outside this
+  // closure) can throttle/restore this cell's player without duplicating
+  // any hls.js lifecycle logic — see PLAN.md "Phase 14 design".
+  video._player = { throttleBackground, restoreForeground };
+
+  start();
+}
+
+async function main() {
+  const res = await authFetch('/api/streams');
+  const data = await res.json();
+  const grid = document.getElementById('grid');
+
+  for (const ch of data.channels) {
+    const mainStream = ch.streams.find(s => s.kind === 'main');
+    if (!mainStream) continue;
+
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.channelId = ch.id;
+    cell.dataset.name = ch.name;
+    cell.dataset.ptzEnabled = ch.ptzEnabled ? 'true' : 'false';
+    cell.innerHTML = `
+      <video muted autoplay playsinline></video>
+      <div class="label"><span>${ch.name}</span><span class="right"><span class="ping"></span><span class="status loading">connecting…</span></span></div>
+    `;
+    grid.appendChild(cell);
+    cell.onclick = () => openOverlay(cell, ch.name, ch.id, ch.ptzEnabled);
+
+    const video = cell.querySelector('video');
+    const status = cell.querySelector('.status');
+    const hlsUrl = `http://${location.hostname}:${data.hlsPort}${mainStream.hlsPath}`;
+
+    setupHlsPlayer(video, status, hlsUrl);
+  }
+
+  pingLoop();
+}
+
+// TCP-connect-time to each IP-proxy camera's own ONVIF manage port — the
+// DVR's ISAPI has no ping/network-delay endpoint on this firmware (see
+// app/main.py's get_ping), so this is the backend's own path to the
+// camera, not literally the DVR's. Analog channels never appear in the
+// response (no ipAddress to ping — see _build_ip_channel), so their .ping
+// span just stays empty (:empty CSS rule above hides it entirely) rather
+// than needing a separate "not applicable" state.
+const PING_INTERVAL_MS = 5000;
+
+async function pingLoop() {
+  try {
+    const res = await authFetch('/api/ping');
+    const data = await res.json();
+    for (const { id, pingMs } of data.channels) {
+      const cell = document.querySelector(`.cell[data-channel-id="${id}"]`);
+      const pingEl = cell?.querySelector('.ping');
+      if (pingEl) pingEl.textContent = pingMs == null ? '' : `${pingMs}ms`;
+    }
+  } catch {
+    // Transient failure (e.g. a 401 mid-debounced-reprompt from authFetch)
+    // — just skip this cycle, the next one retries on its own rather than
+    // needing its own backoff/retry logic like the video players have.
+  }
+  setTimeout(pingLoop, PING_INTERVAL_MS);
+}
+
+ensureAuthKey().then(main);

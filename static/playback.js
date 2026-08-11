@@ -1,0 +1,386 @@
+let hls = null;
+let currentPlaybackName = null;
+let currentChannelId = null;
+let currentSeg = null;
+let channels = [];
+// Pending "continuous playback" auto-advance — see ARCHITECTURE.md
+// "Continuous playback across recording segments" for why this has to be a
+// timer rather than any video/hls.js event (no reliable "segment ended"
+// signal exists on this DVR).
+let continuousTimer = null;
+// The day currently shown by search() — drives the timeline scrubber below.
+let loadedSegments = [];
+let loadedDate = null;
+
+async function loadChannels() {
+  const res = await authFetch('/api/channels');
+  channels = (await res.json()).filter(c => c.enabled);
+  const sel = document.getElementById('channel');
+  sel.innerHTML = channels.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+
+  // Deep-link from the live-view overlay's "Playback" button
+  // (`/playback?channelId=<id>`) — pre-select that channel if present.
+  const requestedChannelId = new URLSearchParams(location.search).get('channelId');
+  if (requestedChannelId && channels.some(c => String(c.id) === requestedChannelId)) {
+    sel.value = requestedChannelId;
+  }
+}
+
+// The DVR's ISAPI timestamps are labeled "Z" (UTC) but are actually its
+// own local wall-clock digits, unconverted (confirmed by extracting a
+// playback frame and reading the DVR's on-screen timestamp — it matched
+// the raw ISAPI digits exactly, not a UTC-shifted version of them). So
+// these strings must be read and written as literal digits, never through
+// `new Date(...)`/`toISOString()`/`toLocaleTimeString()`, which would
+// apply the browser's own timezone on top and produce the wrong time
+// whenever the browser isn't set to the DVR's zone (WIB).
+function fmtTime(iso) {
+  const m = iso.match(/T(\d{2}):(\d{2}):(\d{2})/);
+  return m ? `${m[1]}.${m[2]}.${m[3]}` : iso;
+}
+
+// Same literal-digit rule as fmtTime, just colon-separated to match
+// <input type="time">'s value format ("HH:MM:SS").
+function hms(iso) {
+  const m = iso.match(/T(\d{2}):(\d{2}):(\d{2})/);
+  return m ? `${m[1]}:${m[2]}:${m[3]}` : '';
+}
+
+// Seconds since midnight of `forDate` ("YYYY-MM-DD"), clipped to [0,86400]
+// for timestamps that fall on a different calendar date (a segment can
+// start the previous day and end within the loaded day — see the
+// contiguous-segment example spanning 22:33→00:02 seen against the real
+// DVR). Pure string/integer arithmetic, no Date object — same literal-
+// digit rule as fmtTime/hms, just for timeline positioning instead of
+// display text.
+function secondsSinceMidnight(iso, forDate) {
+  const datePart = iso.slice(0, 10);
+  if (datePart < forDate) return 0;
+  if (datePart > forDate) return 86400;
+  const m = iso.match(/T(\d{2}):(\d{2}):(\d{2})/);
+  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
+// Draws the day timeline: recorded segments as blocks, hour ticks for
+// orientation, and the current-position marker. Called whenever a new
+// day is loaded (search()) — the marker itself is also updated
+// independently (updateMarker) whenever playback moves, without
+// rebuilding the whole timeline.
+function renderTimeline() {
+  const el = document.getElementById('timeline');
+  el.innerHTML = '';
+  if (!loadedDate) return;
+
+  for (const seg of loadedSegments) {
+    const startSec = secondsSinceMidnight(seg.startTime, loadedDate);
+    const endSec = secondsSinceMidnight(seg.endTime, loadedDate);
+    const block = document.createElement('div');
+    block.className = 'block';
+    block.style.left = `${(startSec / 86400) * 100}%`;
+    block.style.width = `${((endSec - startSec) / 86400) * 100}%`; // CSS min-width floors this for short clips
+    block.title = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
+    el.appendChild(block);
+  }
+
+  for (let h = 0; h <= 24; h += 4) {
+    const tick = document.createElement('div');
+    tick.className = 'tick';
+    tick.style.left = `${(h / 24) * 100}%`;
+    tick.textContent = String(h).padStart(2, '0');
+    el.appendChild(tick);
+  }
+
+  const marker = document.createElement('div');
+  marker.className = 'marker';
+  marker.id = 'timelineMarker';
+  el.appendChild(marker);
+
+  updateMarker();
+}
+
+// Moves just the position marker — called on every video timeupdate, and
+// explicitly right after currentSeg changes (both the optimistic
+// assignment and the real one in startPlaybackAt, plus stopCurrent's
+// reset to null) so the marker never shows a stale position from before
+// the change. Hidden whenever nothing is playing or the playing content
+// isn't from the currently-loaded day.
+function updateMarker() {
+  const marker = document.getElementById('timelineMarker');
+  if (!marker) return;
+  if (!currentSeg || !loadedDate || currentSeg.startTime.slice(0, 10) !== loadedDate) {
+    marker.style.display = 'none';
+    return;
+  }
+  const video = document.getElementById('video');
+  const startSec = secondsSinceMidnight(currentSeg.startTime, loadedDate);
+  const nowSec = startSec + (video.currentTime || 0);
+  marker.style.left = `${Math.min(100, Math.max(0, (nowSec / 86400) * 100))}%`;
+  marker.style.display = 'block';
+}
+
+async function search() {
+  const channelId = document.getElementById('channel').value;
+  const date = document.getElementById('date').value;
+  if (!date) { alert('Please select a date first'); return; }
+
+  const start = `${date}T00:00:00Z`;
+  const end = `${date}T23:59:59Z`;
+
+  const container = document.getElementById('segments');
+  container.innerHTML = '<div class="empty">Searching…</div>';
+
+  const res = await authFetch(`/api/recordings?channelId=${channelId}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+  const data = await res.json();
+
+  loadedSegments = data.segments;
+  loadedDate = date;
+  renderTimeline();
+
+  if (data.segments.length === 0) {
+    container.innerHTML = '<div class="empty">No recordings in this range.</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  for (const seg of data.segments) {
+    const el = document.createElement('div');
+    el.className = 'segment';
+    el.textContent = `${fmtTime(seg.startTime)} – ${fmtTime(seg.endTime)}`;
+    el.onclick = () => play(channelId, seg, el);
+    container.appendChild(el);
+  }
+}
+
+async function stopCurrent() {
+  // Cancel any pending auto-advance first — covers every interruption path
+  // (manual segment click, jump-to-time, pressing Stop), since they all
+  // call stopCurrent() before starting anything new.
+  if (continuousTimer) { clearTimeout(continuousTimer); continuousTimer = null; }
+  if (currentPlaybackName) {
+    try {
+      await authFetch('/api/playback/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: currentPlaybackName }),
+      });
+    } catch (e) {
+      // A network hiccup here shouldn't leave our own bookkeeping stuck
+      // pointing at a path we can no longer control — the mediamtx path
+      // itself may leak (existing documented gap, ARCHITECTURE.md), but
+      // the app's state must stay consistent so playback can be restarted.
+    }
+    currentPlaybackName = null;
+  }
+  if (hls) { hls.destroy(); hls = null; }
+  document.getElementById('downloadControls').style.display = 'none';
+  document.getElementById('playerLabel').textContent = 'nothing playing';
+  currentChannelId = null;
+  currentSeg = null;
+  updateMarker();
+}
+
+// Shared by "click a segment", "jump to time", and continuous-playback
+// auto-advance: starts playback at an exact startTime (the backend seeks
+// there — see main.py start_playback — rather than always playing from the
+// segment's own beginning, and clamps to the actual found segment's start
+// if startTime falls in a real recording gap). `searchEndTime` is just a
+// loose upper bound CMSearch uses to locate the covering segment; the
+// backend returns the segment's *real* resolved boundaries
+// (segmentStartTime/segmentEndTime), which is what drives the label, the
+// download defaults, and scheduling the next auto-advance.
+async function startPlaybackAt(channelId, startTime, searchEndTime, activeEl) {
+  await stopCurrent();
+  document.querySelectorAll('.segment.active').forEach(e => e.classList.remove('active'));
+  if (activeEl) activeEl.classList.add('active');
+  document.getElementById('playerLabel').textContent = 'loading…';
+  currentChannelId = channelId;
+  currentSeg = { startTime, endTime: searchEndTime };
+  updateMarker();
+
+  let res;
+  try {
+    res = await authFetch('/api/playback/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId: Number(channelId), startTime, endTime: searchEndTime }),
+    });
+  } catch (e) {
+    document.getElementById('playerLabel').textContent = 'failed to start playback (network error)';
+    return;
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    document.getElementById('playerLabel').textContent = err.detail || 'failed to start playback';
+    return;
+  }
+  const { name, hlsPath, hlsPort, segmentStartTime, segmentEndTime } = await res.json();
+  currentPlaybackName = name;
+  currentSeg = { startTime: segmentStartTime, endTime: segmentEndTime };
+  updateMarker();
+
+  const video = document.getElementById('video');
+  const url = `http://${location.hostname}:${hlsPort}${hlsPath}`;
+  hls = new Hls({ lowLatencyMode: false, xhrSetup: hlsXhrSetup });
+  hls.loadSource(url);
+  hls.attachMedia(video);
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    video.play();
+    // A real recording gap: the resolved segment starts noticeably later
+    // than what was actually requested (tolerance covers the existing +2s
+    // search-boundary nudge). Contiguous segment transitions land within
+    // that tolerance and show the plain range.
+    const gapMs = new Date(segmentStartTime).getTime() - new Date(startTime).getTime();
+    const rangeLabel = `${fmtTime(segmentStartTime)} – ${fmtTime(segmentEndTime)}`;
+    document.getElementById('playerLabel').textContent = gapMs > 5000
+      ? `Skipping recording gap → ${rangeLabel}`
+      : rangeLabel;
+    document.getElementById('downloadControls').style.display = 'inline-flex';
+    // Default clip window: segment start, +30s.
+    const defaultEnd = new Date(new Date(segmentStartTime).getTime() + 30000).toISOString();
+    document.getElementById('downloadStart').value = hms(segmentStartTime);
+    document.getElementById('downloadEnd').value = hms(defaultEnd);
+    scheduleAdvance(segmentStartTime, segmentEndTime);
+  });
+  hls.on(Hls.Events.ERROR, (_evt, data) => {
+    if (!data.fatal) return;
+    if (continuousTimer) { clearTimeout(continuousTimer); continuousTimer = null; }
+    document.getElementById('playerLabel').textContent = 'Playback error — click a segment to try again';
+  });
+}
+
+// Fires a few seconds before the current segment's known natural end (see
+// ARCHITECTURE.md — there's no reliable "segment ended" event on this DVR,
+// mediamtx treats the DVR closing the playback session as a transport
+// error and the video just silently freezes). Guards against hls.js
+// re-firing MANIFEST_PARSED (e.g. on error-recovery) by clearing any
+// existing timer itself, not just relying on stopCurrent().
+function scheduleAdvance(realStart, realEnd) {
+  if (continuousTimer) { clearTimeout(continuousTimer); continuousTimer = null; }
+  const durationMs = new Date(realEnd).getTime() - new Date(realStart).getTime();
+  const leadMs = 4500;
+  const fireInMs = Math.max(0, durationMs - leadMs);
+  armAdvanceCheck(realEnd, fireInMs, fireInMs, 0);
+}
+
+// Bounded drift-check: if the video is still meaningfully behind where it
+// should be (rebuffering — the `waiting` events this DVR fires are real,
+// not instantaneous), re-check shortly instead of cutting the segment
+// early or advancing while the previous stream hasn't actually caught up.
+// Capped retries so a genuinely stuck video doesn't block forever.
+function armAdvanceCheck(afterIso, expectedElapsedMs, delayMs, retries) {
+  continuousTimer = setTimeout(() => {
+    const video = document.getElementById('video');
+    const behindMs = expectedElapsedMs - video.currentTime * 1000;
+    if (behindMs > 1500 && retries < 3) {
+      armAdvanceCheck(afterIso, expectedElapsedMs + 1500, 1500, retries + 1);
+      return;
+    }
+    advanceToNext(afterIso);
+  }, delayMs);
+}
+
+async function advanceToNext(afterIso) {
+  const channelId = currentChannelId;
+  if (channelId == null) return;
+  const searchEnd = `${afterIso.slice(0, 10)}T23:59:59Z`;
+  try {
+    await startPlaybackAt(channelId, afterIso, searchEnd, null);
+  } catch (e) {
+    document.getElementById('playerLabel').textContent = 'auto-advance failed — click a segment to continue manually';
+  }
+}
+
+async function play(channelId, seg, el) {
+  await startPlaybackAt(channelId, seg.startTime, seg.endTime, el);
+}
+
+async function jumpToTime() {
+  const channelId = document.getElementById('channel').value;
+  const dt = document.getElementById('jumpDatetime').value; // "YYYY-MM-DDTHH:MM[:SS]"
+  if (!dt) { alert('Please enter a date & time first'); return; }
+  const startTime = `${dt.length === 16 ? dt + ':00' : dt}Z`;
+  const endTime = `${startTime.slice(0, 10)}T23:59:59Z`;
+  await startPlaybackAt(channelId, startTime, endTime, null);
+}
+
+// Click-to-seek on the day timeline — reuses startPlaybackAt exactly like
+// a segment click or jump-to-time, so clicking a recording gap gets the
+// same backend clamp-to-next-real-segment + gap-indicator label for free
+// (see ARCHITECTURE.md "Continuous playback across recording segments").
+// Pure fraction-of-day arithmetic, no Date object anywhere — clicking
+// still needs zero-padded digits or the built timestamp is malformed.
+async function seekTimeline(event) {
+  if (!loadedDate) return;
+  const channelId = document.getElementById('channel').value;
+  const rect = event.currentTarget.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+  const totalSec = Math.min(86399, Math.floor(frac * 86400));
+  const pad = (n) => String(n).padStart(2, '0');
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const startTime = `${loadedDate}T${pad(h)}:${pad(m)}:${pad(s)}Z`;
+  const endTime = `${loadedDate}T23:59:59Z`;
+  await startPlaybackAt(channelId, startTime, endTime, null);
+}
+
+async function downloadClip() {
+  if (!currentSeg || currentChannelId == null) return;
+  const startHms = document.getElementById('downloadStart').value;
+  const endHms = document.getElementById('downloadEnd').value;
+  if (!startHms || !endHms) { alert('Please enter start and end times'); return; }
+
+  // Build the DVR-literal-digit timestamp directly from the segment's own
+  // date plus the typed HH:MM:SS — plain string concatenation, no Date()
+  // parsing/math involved, so there's no risk of the browser's local
+  // timezone leaking in (see the fake-UTC note on fmtTime above). Assumes
+  // both times fall on the segment's own calendar date; doesn't handle a
+  // range typed across a midnight boundary.
+  const dateStr = currentSeg.startTime.slice(0, 10);
+  const pad = (t) => (t.length === 5 ? `${t}:00` : t);
+  const startTime = `${dateStr}T${pad(startHms)}Z`;
+  const endTime = `${dateStr}T${pad(endHms)}Z`;
+
+  const btn = document.getElementById('downloadBtn');
+  const originalText = btn.textContent;
+  btn.textContent = 'Preparing…';
+  btn.disabled = true;
+  try {
+    const res = await authFetch('/api/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId: Number(currentChannelId), startTime, endTime }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(`Download failed: ${err.detail || res.statusText}`);
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ch${currentChannelId}_${startTime.replace(/[:T]/g, '-').replace('Z','')}.mp4`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } finally {
+    btn.textContent = originalText;
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('searchBtn').onclick = search;
+document.getElementById('jumpBtn').onclick = jumpToTime;
+document.getElementById('stopBtn').onclick = stopCurrent;
+document.getElementById('downloadBtn').onclick = downloadClip;
+document.getElementById('timeline').onclick = seekTimeline;
+document.getElementById('date').valueAsDate = new Date();
+
+// One listener for the video element's whole lifetime — it's never
+// recreated, only hls.attachMedia()/destroy() cycles around it (see
+// stopCurrent/startPlaybackAt), so re-attaching this per playback-start
+// would stack duplicate listeners across a long continuous-playback
+// session. Reads currentSeg/loadedDate fresh each time it fires.
+document.getElementById('video').addEventListener('timeupdate', updateMarker);
+
+ensureAuthKey().then(loadChannels);

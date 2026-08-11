@@ -22,7 +22,7 @@ Rationale in `ARCHITECTURE.md`.
 | 3 | ✅ done | PTZ — channels 9/10 (IP-proxy cameras) got PTZ hardware; `/api/ptz/{channelId}/{continuous,stop}` + live-view D-pad. Analog channels 1-4 still have no PTZ hardware. |
 | 4 | ✅ done | Playback & search — `/api/recordings`, `/api/playback/{start,stop}`, playback UI |
 | 5 | ✅ done | Snapshot & download — `/api/snapshot`, `/api/download` |
-| 6 | ⬜ next | Polish — mediamtx process supervision/health check is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Playback-path GC and the memory/CPU limit re-check are ✅ done — design below. Packaging is done and Docker-only by decision — see `ARCHITECTURE.md`. Event/alarm stream is **blocked**, not attempted: real-device recon found the ISAPI account gets `403 lowPrivilege` on both the push event stream and the poll-based motion-detection status, motion detection itself is disabled, and the DVR has no alarm inputs configured — nothing to build against under the current account/config. Design below. |
+| 6 | ✅ done | Polish — mediamtx process supervision/health check is ✅ done: split into its own Swarm service, deployed to production (`sm-qohelet`/`sw-david01`/`daya-regia.invis`) and verified — both containers healthy on separate nodes, real traffic flowing, all 6 channels reaching live in a browser check against the real domain. Playback-path GC and the memory/CPU limit re-check are ✅ done — design below. Packaging is done and Docker-only by decision — see `ARCHITECTURE.md`. Event/alarm stream is deferred — needs DVR-side account privilege and config changes outside this codebase; see Non-goals. Design below. |
 | 7 | ✅ done | Continuous playback across recording-segment boundaries — auto-advance into the next segment instead of freezing at the end of one; skip forward over a real recording gap instead of stopping. See `ARCHITECTURE.md` "Continuous playback across recording segments". |
 | 8 | ✅ done | Day timeline scrubber for playback — horizontal bar showing the loaded day's recorded segments/gaps, click-to-seek, reusing the existing playback-start/gap-clamp mechanism. See `ARCHITECTURE.md` "Day timeline scrubber". |
 | 9 | ✅ done | Single shared-key auth for the local UI + API + mediamtx's own HLS/WebRTC listeners (video bypasses FastAPI entirely, so protecting only the API wouldn't secure the live view). Design below, implementation details in `ARCHITECTURE.md` "Auth". |
@@ -31,8 +31,14 @@ Rationale in `ARCHITECTURE.md`.
 | 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
 | 14 | ✅ done | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism, the `reconnecting…`-status bug found during verification, and a second stale-lag-timer bug found while re-verifying the fix are all fixed and confirmed against the real DVR (2026-08-10) — background cells held `live` across 5+ minutes/many duty cycles, Prev/Next handoff and modal close both restore correctly. Design below. |
-| 15 | ⬜ next | Client-side real-time video enhancement for the focused/modal stream only (WebGL2 shader pipeline; user-selectable mode, staged incrementally toward an optional ML mode). Design below. |
+| 15.1 | ✅ done | Classical real-time stream enhancement for the focused/modal stream only — WebGL2 shader pipeline (auto-levels/gamma + unsharp mask combined pass), `Off`/`Classical` selector, always-optional fallback to plain `<video>`. First, independently-shippable increment of the Phase 15 enhancement pipeline — not blocked on any ML work below. Fully verified against the real DVR (2026-08-12): all four checklist items confirmed, including an objective (not just visual) measurement of the enhancement's effect on real IR footage. One real bug found and fixed along the way (stale-frame flash on retarget). Design below. |
+| 15.2 | ⬜ later | ML groundwork for stream enhancement, not yet user-facing — pick and vendor a lightweight browser-capable model + runtime (`static/vendor/`, no CDN), land it as a dev-only `ml` processor behind a flag so real FPS/quality can be measured against this DVR's actual streams before committing to ship it. Depends on 15.1's pipeline/canvas/lifecycle plumbing. Design below. |
+| 15.3 | ⬜ later | `AI` becomes a real, user-facing selector option — gated by a runtime capability/performance check that auto-falls-back to `Classical` on a device too weak for the ML pass. Depends on 15.2 having already proven the model/runtime choice on real hardware. Design below. |
 | 16 | ✅ done | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which previously required a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Implemented and verified (2026-08-10): recreated the exact incident locally (`docker-compose.yml`'s network-mode split, killed and fully recreated the `mediamtx` container while `dvr-window` kept running) — confirmed the fresh container came up with zero paths, then self-healed within one 30s sweep with no `dvr-window` restart, HLS confirmed actually serving again afterward. Design below. |
+| 17.1 | ⬜ next | Browser-side FPS/perf instrumentation for the live grid — no such tooling exists yet, and Phase 15.1's own "zero measurable impact on the grid" verification item was never completed for exactly that reason. Foundational: nothing else in Phase 17 can be honestly verified without it. Design below. |
+| 17.2 | ⬜ later | Low-risk grid tuning: hls.js buffer/back-buffer config, staggered initial connection storm, CSS containment on grid cells. Depends on 17.1 for before/after numbers. Design below. |
+| 17.3 | ⬜ later | Backend prerequisite for 17.4 — verify real per-channel `sub`-stream codec against the DVR, and drop `_build_paths`'s H.265 transcode restriction to `_main`-only paths so a switch to `sub` in the grid doesn't ship an unplayable H.265 stream to Chrome. Design below. |
+| 17.4 | ⬜ later | Grid cells switch from `main` to `sub` (the actual decode-cost fix — CSS scaling doesn't reduce browser decode work, so all 6 cells currently decode full-resolution for thumbnail-sized boxes), modal keeps `main`, via `hls.loadSource()` source-swap on open/close rather than a second instance or a full rebuild. Depends on 17.3. Design below. |
 
 Detailed findings for each completed phase (exact endpoints, bugs
 found and fixed, design decisions) are in `ARCHITECTURE.md` rather than
@@ -62,7 +68,7 @@ Three remaining Phase 6 items, two done this round:
   (roughly double the confirmed clean-connection floor). Full numbers,
   methodology, and the reconnect-churn caveat in `ARCHITECTURE.md`
   under "Memory/CPU limit re-check (Phase 6)".
-- **Event/alarm stream** (blocked, not attempted): real-device recon
+- **Event/alarm stream** (deferred, not attempted): real-device recon
   against the actual DVR found the ISAPI account gets `403
   lowPrivilege` on both `/ISAPI/Event/notification/alertStream` (the
   push event stream) and the poll-based
@@ -584,8 +590,37 @@ one real bug found:**
    recurrence of the stuck-`reconnecting…` or frozen-`MediaSource`
    failure modes); Prev/Next handoff and modal close both restored
    every cell correctly.
+5. **Third bug, reported by the user in real use (2026-08-10)**:
+   background cells going visibly black during a modal session, still
+   black for a moment after closing it. Root cause: the
+   `Hls.Events.ERROR` handler's final escalation tier — a full rebuild
+   (`hls.destroy()` + new `Hls()` + `attachMedia()`) — ran immediately
+   even while backgrounded. Fix #1 above made sure this tier still
+   *runs* while backgrounded (rather than leaving the stream stuck),
+   but running it blanks the video to black immediately, since a fresh
+   `MediaSource` starts with zero buffered data — and while
+   backgrounded, that fresh instance only gets `BG_ON_MS` (2s) per duty
+   cycle to load anything before being paused again, often not enough
+   for even one frame, so the cell can stay visibly black for many
+   cycles. Fixed by deferring the rebuild itself: a `pendingRebuild`
+   flag is set instead of rebuilding immediately, and `restoreForeground()`
+   performs the actual rebuild only once the cell is about to be looked
+   at again — until then the stale (but never-destroyed) `hls` instance
+   just sits there showing its last good frame, frozen rather than
+   black. Applied the same treatment to the Safari-native fallback's
+   `error` listener (reassigning `video.src` has the same blanking
+   effect as a full rebuild). Verified against the real DVR by forcing
+   a genuine, sustained fatal error on a backgrounded cell (an XHR
+   interception redirecting that channel's requests to a closed port,
+   not just reasoning about it) for 215+ seconds: the video stayed
+   frozen on its last good frame throughout — same non-black pixel
+   sample the entire time — with `status` correctly staying `live`
+   throughout rather than flashing `reconnecting…`; closing the modal
+   correctly triggered the deferred rebuild, visibly (and correctly)
+   showing `reconnecting…` while the still-simulated failure persisted,
+   then recovering cleanly once the simulated failure was lifted.
 
-## Phase 15 design: client-side real-time stream enhancement (focused stream only, staged toward ML)
+## Phase 15.1 design: classical stream enhancement (pipeline + shader)
 
 Builds directly on Phase 14: once the focused camera's stream is the
 one getting priority bandwidth/CPU while its modal is open, that same
@@ -597,7 +632,8 @@ scoped to the one `<video>` currently sitting in `#overlaySlot`, never
 the grid.
 
 **Architecture — one pipeline, pluggable processors, so "which method"
-is a config choice, not a rewrite:**
+is a config choice, not a rewrite** (this shared plumbing is what makes
+15.2/15.3 additive later rather than a rewrite):
 
 - `openOverlay()` creates a WebGL2 `<canvas>` sized to match the
   `<video>` and stacks it directly over it in `#overlaySlot`; the
@@ -619,29 +655,28 @@ is a config choice, not a rewrite:**
   texture, runs whichever **processor** is currently selected
   (`off` / `classical` / later `ml`), writes to the visible canvas.
   Processors are swappable behind this one interface specifically so
-  the incremental stages below (classical now, ML later) don't require
-  redoing the canvas/texture/lifecycle plumbing — only a new processor
-  gets added each time.
+  15.2/15.3 below don't require redoing the canvas/texture/lifecycle
+  plumbing — only a new processor gets added each time.
 
 **Method selector — user picks, not auto-decided:**
 
 - A control in `.overlay-side` (alongside Snapshot/Playback/Fullscreen)
   cycling `Off` (default) / `Classical` — `AI` is added to this same
-  list only once the ML stage below actually ships, not built as a
-  disabled placeholder now (a "coming soon" option that does nothing
-  is worse than no option). Choice persists in `localStorage`
-  (`enhanceMode`, same pattern `static/auth.js` already uses for the
-  auth key) — one global preference applied to whichever camera is
-  currently focused, not remembered per-channel; simplest thing that
-  works, revisit only if real usage shows people want different modes
-  per camera (e.g. always-classical on the noisy IR channels, off on
-  the already-sharp ones).
+  list only once 15.3 actually ships, not built as a disabled
+  placeholder now (a "coming soon" option that does nothing is worse
+  than no option). Choice persists in `localStorage` (`enhanceMode`,
+  same pattern `static/auth.js` already uses for the auth key) — one
+  global preference applied to whichever camera is currently focused,
+  not remembered per-channel; simplest thing that works, revisit only
+  if real usage shows people want different modes per camera (e.g.
+  always-classical on the noisy IR channels, off on the already-sharp
+  ones).
 - `off` is a true passthrough (canvas layer not even created) — zero
   overhead for anyone who doesn't want this, and the default for
   everyone until they opt in.
 
-**Classical processor (this phase's actual deliverable) — two cheap
-single-pass shaders:**
+**Classical processor (this sub-phase's actual deliverable) — two
+cheap single-pass shaders:**
 
 - **Auto-levels / gamma boost**: stretches the frame's black/white
   point and applies a configurable gamma lift — targets this DVR's
@@ -667,49 +702,28 @@ runtime error inside a processor all fall back to plain unenhanced
 `<video>` — never to a broken or blank picture, and never by retrying
 in a loop.
 
-**Incremental roadmap toward ML — staged so nothing downstream is
-built before the stage that justifies it is proven:**
-
-- **15.1 (this round's scope)** — the pipeline/canvas/lifecycle
-  plumbing above, the mode selector (`Off`/`Classical` only), and the
-  classical processor. Ships alone as a complete, useful feature —
-  intentionally not blocked on any ML work below.
-- **15.2 — ML groundwork, not yet user-facing**: pick a lightweight
-  browser-capable model (a small super-resolution net like ESPCN/FSRCNN,
-  or a denoise-focused one — final pick needs benchmarking against
-  real footage from this DVR, not assumed) and a runtime
-  (TensorFlow.js or ONNX Runtime Web, WebGL/WebGPU backend). Whatever
-  is chosen must be **vendored locally** (`static/vendor/`,
-  gitignored-model-weights-or-not decided at that time) per `AGENTS.md`'s
-  existing no-CDN-dependency rule for frontend deps — the model weights
-  themselves only fetched lazily when a user actually selects `AI`
-  mode later, never on page load, so nobody pays that download for a
-  feature they never turn on. This stage lands the `ml` processor
-  behind a dev-only flag, not in the public selector yet, so real FPS/
-  quality can be measured against this DVR's actual streams before
-  committing to ship it.
-- **15.3 — `AI` becomes a real selector option**, gated by a runtime
-  capability/performance check (e.g. a brief benchmark pass on
-  pipeline init) that auto-falls-back to `Classical` if the device
-  can't sustain acceptable frame rate — the same "always have an
-  accepted fallback" policy as WebGL2-unavailable above, applied to
-  "WebGL2 exists but this device's GPU is too weak for the ML pass
-  specifically." Requires real-device verification (per `AGENTS.md`)
-  on more than one client, not just the dev machine, before this stage
-  is considered done — ML inference cost varies far more by hardware
-  than the classical shader pass does.
-- **15.4 (explicit non-goal until 15.1-15.3 are proven)** — per-camera
-  default modes, auto-switching heuristics (e.g. auto-`Classical` on
-  known-dark channels), or any server-side involvement. Not speced
-  further here; premature ahead of real usage data from the earlier
-  stages.
-
 **Verification plan** (per `AGENTS.md` — real DVR and real client
 hardware, not just reasoned about):
 
 - Confirm the classical pass visibly improves at least one genuinely
-  dark/soft real feed from this DVR (before/after screenshots), not
-  just that the shader compiles.
+  dark/soft real feed from this DVR, not just that the shader compiles.
+  Prefer measuring this objectively over eyeballing before/after
+  screenshots: capture a raw frame from the stream (ffmpeg snapshot, or
+  the app's own Snapshot button) and run the *same* GLSL math (auto-levels/
+  gamma + unsharp mask, `static/enhance.js`'s `ENHANCE_FRAGMENT_SRC`) as a
+  small Python/numpy script against it, rather than trying to align two
+  separately-captured screenshots — this gives a byte-comparable "what the
+  shader should produce" reference. Then compute before/after numbers:
+  histogram black/white-point spread (did auto-levels actually widen the
+  dynamic range), luminance std dev (contrast), and Laplacian variance
+  (sharpness — confirms the unsharp mask added edge energy without
+  tipping into halos). These metrics confirm the pixels moved in the
+  intended direction but won't catch blown highlights or unnatural
+  sharpening artifacts on their own — pair them with one quick visual
+  check, not a substitute for it. Worth writing as a small reusable
+  script (raw frame in, both sets of metrics + a diff image out) rather
+  than a one-off check, since future dark-feed regressions (15.2/15.3)
+  will want the same comparison.
 - Confirm zero measurable impact on the grid's other 5 cells or
   Phase 14's throttling behavior while enhancement runs in the modal.
 - Confirm the selector persists across a page reload and correctly
@@ -719,10 +733,141 @@ hardware, not just reasoned about):
 - Confirm Prev/Next (`showAdjacent`) correctly re-targets the canvas to
   the newly-focused channel's video with no stale frame or leaked
   WebGL context from the previous one.
-- (15.2/15.3 only, once reached) confirm the ML processor's vendored
-  weights load with no network calls beyond this LAN/the local
-  service, and that the perf-fallback genuinely engages on a
-  deliberately underpowered test client.
+
+**Status (2026-08-12): implemented and fully verified — all four
+checklist items confirmed, one real bug found and fixed along the way.**
+
+- **Bug found and fixed**: retargeting the enhancement pipeline to a
+  different video (mode toggle, or opening/closing/Prev-Next between
+  channels) could briefly show the *previous* channel's last rendered
+  frame under the newly-focused channel's name — `applyEnhancement()`
+  used to flip `canvas.style.display = 'block'` as soon as
+  `pipeline.start()` returned, but the canvas is a single long-lived
+  element (by design, see its class comment) that still holds whatever
+  the previous video last drew into it until a fresh frame actually
+  arrives. Confirmed for real via a scripted repro (primed the canvas
+  with IPCamera 02's content, then opened Garasi and read the canvas
+  pixels in the very next tick, before any new frame could have
+  rendered — identical to the stale IPCamera 02 frame). Fixed in
+  `static/enhance.js`: `EnhancementPipeline` now takes an `onFirstFrame`
+  callback, fired only once `_renderFrame()` has actually drawn a real
+  frame from the *currently targeted* video; `applyEnhancement()` defers
+  the video/canvas visibility swap to that callback instead of doing it
+  eagerly, so the plain `<video>` (always correct, just unenhanced)
+  stays visible until the enhanced picture is verifiably ready. Re-ran
+  the same scripted repro against the fix: canvas never shows nor holds
+  stale content anymore. This is the mechanism the "no stale frame ...
+  from the previous one" checklist item below was worried about — it
+  turned out to apply to every retarget, not just Prev/Next.
+- **Confirmed**: selector persists across a page reload (`enhanceMode`
+  in `localStorage`, survives navigation as expected).
+- **Confirmed**: WebGL2-unavailable fallback, tested via a real
+  capability gap (temporarily made `canvas.getContext('webgl2')` return
+  `null`, matching what `enhanceCapable()`'s own probe checks) — 
+  enhancement silently stays off, plain `<video>` stays visible, no
+  console errors. (First attempt at this test gave a false failure
+  because the modal was left open from a prior check — closing it first
+  before re-testing gave the correct, clean result on retest.)
+- **Confirmed**: zero measurable impact on the grid's other 5 cells or
+  Phase 14's throttling while enhancement runs in the modal — verified
+  with a single atomic, precisely-timestamped `XMLHttpRequest`
+  instrumentation script (not the separate-tool-call polling used in an
+  earlier, misleading attempt — see note below) spanning 26 real seconds:
+  opened Teras (ch1) via the real `openOverlay()` flow with Classical
+  enhancement active, and simultaneously logged every request to both
+  ch1 and a background cell (ch2/Car Port). Result: ch1 sustained a
+  steady, undisturbed ~4 req/s the entire window (enhancement adds no
+  network activity of its own — expected, since it's pure client-side
+  WebGL2 rendering); ch2 correctly duty-cycled — silent for ~10s, a
+  ~2s burst of requests, repeating on schedule twice in the window,
+  matching `BG_OFF_MS`/`BG_ON_MS` exactly. An earlier attempt at this
+  same check (using separate `read_network_requests` tool calls with
+  `clear`/wait/`check` as distinct steps) gave a false "throttling isn't
+  working, cells fetch continuously" result — traced to the tool calls
+  themselves having unknown, uncontrolled latency between them, not a
+  real bug; the atomic in-page script above is the trustworthy version
+  and fully vindicates Phase 14's mechanism.
+- **Confirmed (2026-08-12)**: the classical pass visibly improves a
+  genuinely dark/IR real feed. The previous session's browser-automation
+  tab couldn't produce a decoded frame under any approach tried
+  (`requestVideoFrameCallback` never fired, `document.visibilityState`
+  stuck `"hidden"`, `texImage2D` snapshots found every video stuck at
+  `readyState: 0`, ruled out as session/resource degradation via a
+  fresh-tab retest) — a later session's tab happened to actually have
+  `visibilityState: "visible"`, unblocking real decode. Used
+  `IPCamera 02` (channel 10) after all — deferred earlier for its
+  latency/distance (`MEMORY.md`), but by night it was the clearest
+  genuinely-dark real feed available, and the checklist item only needs
+  *a* representative dark feed, not a low-latency one. Followed the
+  objective methodology documented above instead of eyeballing
+  screenshots: pulled a real raw frame via `/api/snapshot?channelId=10`
+  (server-side, unaffected by any client-side canvas state) and
+  reproduced `ENHANCE_FRAGMENT_SRC`'s exact math in a numpy script
+  against it. Results: contrast (luminance std dev) +6.0%, mid-tone
+  dynamic-range spread (10th/90th percentile — 1st/99th saturated at
+  0/255 already, from the burned-in white timestamp text and pure-black
+  shadow corners) +7.0%, sharpness (Laplacian variance) +128.8%. Visual
+  inspection of the computed-enhanced frame confirms genuinely crisper
+  carpet-pattern and pillar edges and better shadow differentiation,
+  with a minor, expected tradeoff of amplified sensor noise/grain in flat
+  dark areas from the unsharp mask — not a concern, matches how unsharp
+  masking normally behaves on noisy source material. Incidentally also
+  confirmed the live pipeline renders correctly end-to-end in a real
+  browser (canvas showed real 1920×1080 enhanced content), i.e. the
+  stale-frame fix above works in practice, not just in the scripted
+  repro. A well-lit daytime scene (`Garasi`) was checked earlier as
+  best-effort and showed only a subtle difference by comparison,
+  consistent with the classical pass targeting genuinely dark/soft
+  footage rather than daytime footage.
+
+## Phase 15.2 design: ML groundwork for stream enhancement (dev-only, not yet user-facing)
+
+Staged separately from 15.3 so nothing downstream (a public `AI`
+option) gets built before the model/runtime choice is actually proven
+against this DVR's real footage — this sub-phase is pure groundwork,
+with no visible change for a normal user.
+
+- Pick a lightweight browser-capable model (a small super-resolution
+  net like ESPCN/FSRCNN, or a denoise-focused one — final pick needs
+  benchmarking against real footage from this DVR, not assumed) and a
+  runtime (TensorFlow.js or ONNX Runtime Web, WebGL/WebGPU backend).
+- Whatever is chosen must be **vendored locally** (`static/vendor/`,
+  gitignored-model-weights-or-not decided at that time) per `AGENTS.md`'s
+  existing no-CDN-dependency rule for frontend deps — the model weights
+  themselves only fetched lazily when a user actually selects `AI`
+  mode later (once 15.3 ships), never on page load, so nobody pays
+  that download for a feature they never turn on.
+- Lands the `ml` processor (same `EnhancementPipeline` interface 15.1
+  already defined) behind a dev-only flag, not in the public selector
+  yet, so real FPS/quality can be measured against this DVR's actual
+  streams before committing to ship it.
+- Depends on 15.1's pipeline/canvas/lifecycle plumbing already being in
+  place — no new plumbing of its own.
+
+**Verification plan**: confirm the vendored model/runtime loads and
+runs the `ml` processor (behind its dev-only flag) with no network
+calls beyond this LAN/the local service, and record real FPS/quality
+measurements against actual footage from this DVR — the data this
+stage exists to produce, and what 15.3's go/no-go decision rests on.
+
+## Phase 15.3 design: `AI` becomes a real selector option
+
+- `AI` is added to the `Off`/`Classical`/`AI` selector (15.1) as a
+  real, user-facing choice — gated by a runtime capability/performance
+  check (e.g. a brief benchmark pass on pipeline init) that
+  auto-falls-back to `Classical` if the device can't sustain acceptable
+  frame rate. Same "always have an accepted fallback" policy as
+  WebGL2-unavailable in 15.1, applied to "WebGL2 exists but this
+  device's GPU is too weak for the ML pass specifically."
+- Depends on 15.2 having already benchmarked and settled on a model/
+  runtime — this sub-phase is the productionization of that choice,
+  not a new one.
+
+**Verification plan**: real-device verification (per `AGENTS.md`) on
+more than one client, not just the dev machine — ML inference cost
+varies far more by hardware than the classical shader pass does.
+Confirm the perf-fallback genuinely engages on a deliberately
+underpowered test client, not just that it compiles.
 
 ## Phase 16 design: self-heal mediamtx live-view paths after an independent restart
 
@@ -812,6 +957,197 @@ real disruptions caused during testing, and stayed silent on every other
 with an authenticated `curl` against the recovered `ch1_main` HLS
 playlist returning `200` afterward, not just that the path existed.
 
+## Phase 17 design: browser-side FPS for the live grid
+
+**Problem**: the live grid (`static/index.js`) runs one independent
+hls.js instance per channel (currently 6: analog 1-4 + IP-proxy 9-10),
+all decoding continuously and simultaneously all the time — Phase 14's
+throttling only kicks in for non-focused cells while the modal is open.
+Every cell requests each channel's `main` (full-resolution) stream, even
+though grid cells are laid out as small ~320×180px CSS Grid tiles — the
+full-res decode is thrown away by CSS scaling; the browser doesn't
+decode less because the element is drawn smaller. hls.js is constructed
+with only `{ lowLatencyMode: true, xhrSetup }`, no buffer/back-buffer
+tuning. There is currently **zero FPS/performance instrumentation**
+anywhere in the codebase — Phase 15.1's own verification checklist
+includes "confirm zero measurable impact on the grid's other 5 cells,"
+which was never completed because there was no tool to measure it with.
+
+Four sub-phases, ordered so each is validated with real numbers before
+the next relies on it, per this project's real-DVR/real-client
+verification standard (`AGENTS.md`):
+
+### 17.1: FPS/perf instrumentation (foundational)
+
+Nothing else in Phase 17 can be honestly verified without this — it
+closes the exact gap that left Phase 15.1's own checklist unfinished.
+
+- New `static/debugfps.js`, gated behind
+  `localStorage.getItem('debugFps') === '1'` (settable via
+  `?debugFps=1`, same persistence pattern as `enhance.js`'s
+  `enhanceMode`) — zero extra work on a normal page load when disabled.
+- **Per-grid-cell decode stats**: poll `video.getVideoPlaybackQuality()`
+  (delta `totalVideoFrames`/`droppedVideoFrames` per ~1s, one
+  `setInterval` per cell) — a cheap counter read, not a per-frame
+  callback, so measuring 6 cells doesn't itself add decode contention.
+- **Modal/focused video**: reuse the `requestVideoFrameCallback` pattern
+  already established in `enhance.js` (only one stream; the callback may
+  already be firing there if enhancement is active).
+- **Page-level jank**: one single global `requestAnimationFrame` loop
+  (not per-video) to separate "video decode is slow" from "main thread
+  is janky for unrelated reasons" (e.g. the status/ping
+  `MutationObserver` mirroring in `index.js:11-37`).
+- Small on-screen badge per cell when the flag is on (e.g.
+  `24fps / 2 drop`). One new `<script>` tag in `index.html` near the
+  existing `enhance.js` tag.
+
+**Verification plan**: real DVR, all 6 real channels live — counters
+read sane numbers (cross-check against each channel's actual encoder
+frame rate, not an assumed 25/30fps); confirm negligible CPU overhead
+with the flag on vs. off (Chrome Task Manager, real client hardware);
+confirm zero DOM/console difference with the flag off.
+
+### 17.2: low-risk grid tuning (buffer config + connect stagger + CSS containment)
+
+Bundled into one phase/PR — each item is individually small, low-risk,
+and validated by the same 17.1 before/after run.
+
+- **hls.js buffer config** (`static/index.js:465`, the `new Hls({...})`
+  in `start()`): add `maxBufferLength: 10`, `maxMaxBufferLength: 20`,
+  `backBufferLength: 10` (down from library defaults) to reduce
+  buffering/memory overhead across 6 concurrently-open `MediaSource`
+  buffers. No real ABR to tune here — each stream is a single-rendition
+  HLS path, not a multi-bitrate variant playlist, so hls.js's ABR
+  machinery has nothing to select between.
+  **Real regression risk**: channels 9/10's wireless link has
+  documented jitter (existing `dup=`/`drop=` comments, generous
+  watchdog thresholds already tuned around it) — shrinking buffers
+  could increase false-positive "lagging…"/rebuild triggers specifically
+  on those channels. Needs an overnight real-DVR soak test watching 9/10
+  for status flapping, not a smoke test.
+- **Stagger initial connection storm** (`main()`,
+  `static/index.js:628-657`): defer each cell's `setupHlsPlayer(...)`
+  call by `index * ~250ms` via `setTimeout`, keeping DOM/skeleton
+  creation synchronous. Smooths the initial burst of up to 6
+  simultaneous manifest fetches + mediamtx on-demand ffmpeg cold-starts;
+  doesn't reduce steady-state per-frame CPU cost once all 6 are
+  decoding — real but lower-priority than the buffer tuning above.
+- **CSS containment** (`static/index.css`, `.cell` rule): add
+  `contain: layout paint style` (not `contain: size` — would fight the
+  existing `minmax(320px, 1fr)` + `aspect-ratio: 16/9` intrinsic
+  sizing). Scopes each cell's layout/paint boundary so per-cell
+  status/ping DOM churn doesn't force sibling-cell recalculation.
+  Explicitly not adding `content-visibility: auto` (no off-screen cells
+  to skip in a normally-all-visible 6-cell grid) or `will-change`
+  (forces a compositor layer per cell for no real benefit here — cells
+  aren't animated).
+
+**Verification plan**: 17.1's instrumentation before/after for
+connect-burst network waterfall + page-level jank; overnight real-DVR
+soak specifically on channels 9/10 for buffer-tuning regressions;
+visual check that `contain: paint` doesn't break the existing
+`overflow: hidden`/border-radius clipping on `.cell`.
+
+### 17.3: backend prerequisite — sub-stream codec verification + transcode-scope fix
+
+Hard prerequisite for 17.4 — not parallelizable with it. The backend
+already exposes a `sub` HLS path for every channel via `/api/streams`
+(`kind: "sub"`); the frontend just never requests it.
+
+- **Verify real codec** of each channel's `sub` stream against the
+  actual DVR (ffprobe, or the DVR's own ISAPI capability response — same
+  source `_build_paths` already reads `stream["codec"]` from) for all 6
+  channels. Cheap and read-only; determines how much of 17.3b/17.4 this
+  deployment actually needs. `MEMORY.md` currently flags analog
+  channels' sub-streams as possibly still H.265 (unverified).
+- **Fix `_build_paths`'s transcode scope** (`app/mediabridge.py:95`):
+  currently `if stream["codec"] == "H.265" and name.endswith("_main")`
+  — drop the `_main`-only restriction (`if stream["codec"] == "H.265":`)
+  so any H.265 sub-stream also gets transcoded once the frontend starts
+  requesting it; otherwise it would ship an unplayable stream to Chrome
+  (no native HEVC/MSE support). Update the adjacent comment and
+  `ARCHITECTURE.md`'s matching "H.265→H.264 transcode for main streams"
+  section.
+
+**Real risk — the biggest in this whole phase**: `ARCHITECTURE.md`
+already documents the existing single (channel 10 main) transcode
+running at only ~1.0-1.05x real-time with "little CPU headroom." If
+17.3a finds analog sub-streams are also H.265, going from 1 to
+potentially 5-6 concurrent transcodes could overwhelm the production
+host. This may mean 17.4 ships scoped down (only channels with
+natively-H.264 subs switch; H.265-sub channels stay on `main` in the
+grid) rather than a blanket switch.
+
+**Verification plan**: codec confirmed per channel, documented; for any
+newly-transcoded sub-stream, confirm output actually plays and matches
+source (same `ffmpeg -frames:v 1` comparison method already used for
+the main-stream transcode); confirm sustained CPU headroom on the
+actual production host over a realistic period, not just a dev-box
+smoke test.
+
+### 17.4: frontend — grid uses `sub`, modal uses `main`
+
+The actual decode-cost win. Gated on 17.3 landing and being verified for
+this deployment's real channel set.
+
+**Mechanism**: same hls.js instance, `hls.loadSource(newUrl)` swap on
+modal open/close — not a second instance, not a full rebuild.
+- Two instances (separate always-alive grid player + on-demand modal
+  player) would break the single-`<video>`-node-relocation pattern that
+  Phase 14 (`throttleBackground`/`restoreForeground`) and Phase 15.1
+  (`applyEnhancement` targeting "whichever video is in `#overlaySlot`")
+  both depend on, for marginal benefit.
+- A full instance rebuild (`hls.destroy()` + new `Hls()`) reuses the
+  existing `start()` path, but that path is documented (above) as
+  blanking the video to black until rebuffered — already a known
+  complaint for background-cell rebuilds; making it the standard cost
+  of every modal open/close would likely reproduce that complaint
+  constantly.
+- `hls.loadSource()` on the existing attached instance is hls.js's
+  documented mechanism for switching content on a live player without a
+  full rebuild.
+
+**Concrete changes** (`static/index.js`):
+- `setupHlsPlayer(video, status, subUrl, mainUrl)` — track a mutable
+  `currentUrl` instead of the current single closed-over `hlsUrl`.
+- New `switchSource(newUrl)`: no-op if already current; otherwise reset
+  watchdog state the same way a fresh `MANIFEST_PARSED` would
+  (`retryMs`, `consecutiveErrors`, `driftSinceMs`, `clearLagTimers()`),
+  then `hls.loadSource(newUrl)` (or `video.src = newUrl` on the
+  native-Safari fallback path).
+- `video._player = { throttleBackground, restoreForeground, switchSource }`.
+- `main()`: resolve both `sub` and `main` stream URLs per channel; grid
+  cells build against `sub` (store `main` on `cell.dataset.mainUrl`);
+  defensive fallback to `main` (with `console.warn`) if a channel has
+  no `sub` entry.
+- `openOverlay()` (`index.js:61-77`): call
+  `video._player?.switchSource(mainUrl)` before
+  `video._player?.restoreForeground()` — ordering matters, since a
+  queued `pendingRebuild` reads the shared `currentUrl` when it fires.
+- `closeOverlay()`/`showAdjacent()` (`index.js:126-135, 165-183`): call
+  `video._player?.switchSource(subUrl)` on the outgoing video,
+  symmetric placement.
+- No changes needed to `syncOverlayStatus`/`syncOverlayPing` or
+  `enhance.js` — both already operate independent of which URL is
+  loaded.
+
+**Verification plan**: using 17.1's instrumentation, measure aggregate
+grid decode-FPS/CPU with `sub` vs. today's `main`-everywhere baseline
+on the real DVR (record the result even if the win turns out marginal
+— that's useful information either way); repeated open/close/Prev/Next
+soak test (dozens of cycles) on real client hardware with Chrome's
+memory profiler, confirming no leak from repeated `loadSource()` calls
+and an acceptably brief switch-induced rebuffer; re-run Phase 14's and
+Phase 15.1's existing verification checklists against this changed code
+path, since both now depend on `switchSource` sequencing; confirm
+production-host CPU/network stays healthy with the real
+transcoded/passthrough mix from 17.3.
+
+**Recommended sequencing**: ship 17.1+17.2 first as their own PR, get
+real before/after numbers, then decide 17.3/17.4's scope (possibly
+per-channel, depending on what 17.3a's codec survey finds) as a
+follow-up — 17.3/17.4 carry materially more risk than 17.1/17.2.
+
 ## Non-goals (for now)
 
 - Two-way audio talk-back.
@@ -822,18 +1158,26 @@ playlist returning `200` afterward, not just that the path existed.
   only supported deployment path — it's already built, working, and
   running in production (`docker-compose.yml` standalone,
   `docker-compose.swarm.yml` for the mediamtx-split Swarm setup).
+- Event/alarm stream — deferred, not a code gap: the ISAPI account
+  gets `403 lowPrivilege` on both the push and poll mechanisms, motion
+  detection is disabled, and no alarm inputs are configured on the
+  DVR. Revisit only if the DVR account/config changes.
+- Per-camera default enhancement modes, auto-switching heuristics (e.g.
+  auto-`Classical` on known-dark channels), or any server-side
+  involvement in stream enhancement (Phase 15.4) — explicit non-goal
+  until 15.1-15.3 are proven; premature ahead of real usage data from
+  those earlier stages.
 
 ## Next step
 
-Phase 14 (prioritize focused-camera stream speed via background
-throttling — design above) is next up for implementation, followed by
-Phase 15's first stage (15.1: client-side classical enhancement for
-the focused stream, with the ML stages 15.2-15.4 staged for later —
-design above). Phase 16 (self-heal mediamtx live-view paths after an
-independent restart — design above) was added 2026-08-10 after a real
-production incident and should be prioritized alongside/ahead of 14/15
-given it's a reliability gap, not a feature. Playback-path GC and the
-memory/CPU limit re-check are done (see "Phase 6 design" above).
-Event/alarm stream is blocked on DVR account privilege and config, not
-code — revisit if that changes. No other Phase 6 items are currently
-open.
+Phase 6 is fully done. Phases 14 (focused-stream throttling), 15.1
+(classical stream enhancement), and 16 (mediamtx live-view path
+self-heal) are all done, verified against the real DVR, and (14/16)
+deployed to production (2026-08-10; 15.1 verified 2026-08-12, not yet
+deployed). 15.2 (ML groundwork) and 15.3 (`AI` as a real selector
+option) are next up in order, each depending on the one before it
+proving out. Phase 17 (browser-side FPS for the live grid — design
+above) can start any time: 17.1 (FPS instrumentation) and 17.2
+(low-risk grid tuning) have no dependencies; 17.3 (backend sub-stream
+prerequisite) and 17.4 (grid switches to `sub`) are gated on 17.1/17.2
+landing first and on 17.3's real-DVR codec/CPU-headroom findings.
