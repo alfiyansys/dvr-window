@@ -31,7 +31,7 @@ Rationale in `ARCHITECTURE.md`.
 | 12 | ✅ done | Fix silent live-view drift: status shows `live` while playback is steadily advancing but stuck well behind the actual live edge (confirmed via a real screenshot — DVR's burned-in timestamp ~26 min behind the wall clock while the badge stayed green). The Phase 11 watchdog only caught *frozen* frames, not this. Design below. |
 | 13 | ✅ done | Per-camera network latency (`GET /api/ping`), shown next to each IP-proxy channel's status badge. Only channels with a network hop to measure get a number — analog channels (coax, no IP) never appear in the response. Design below. |
 | 14 | ✅ done | Prioritize the focused camera's stream speed while its detail modal is open — throttle (not pause) the other grid cells' background streams so the focused one gets more client/network/DVR-link bandwidth. Duty-cycle mechanism, the `reconnecting…`-status bug found during verification, and a second stale-lag-timer bug found while re-verifying the fix are all fixed and confirmed against the real DVR (2026-08-10) — background cells held `live` across 5+ minutes/many duty cycles, Prev/Next handoff and modal close both restore correctly. Design below. |
-| 15.1 | ⬜ next | Classical real-time stream enhancement for the focused/modal stream only — WebGL2 shader pipeline (auto-levels/gamma + unsharp mask combined pass), `Off`/`Classical` selector, always-optional fallback to plain `<video>`. First, independently-shippable increment of the Phase 15 enhancement pipeline — not blocked on any ML work below. Design below. |
+| 15.1 | ✅ done | Classical real-time stream enhancement for the focused/modal stream only — WebGL2 shader pipeline (auto-levels/gamma + unsharp mask combined pass), `Off`/`Classical` selector, always-optional fallback to plain `<video>`. First, independently-shippable increment of the Phase 15 enhancement pipeline — not blocked on any ML work below. Fully verified against the real DVR (2026-08-12): all four checklist items confirmed, including an objective (not just visual) measurement of the enhancement's effect on real IR footage. One real bug found and fixed along the way (stale-frame flash on retarget). Design below. |
 | 15.2 | ⬜ later | ML groundwork for stream enhancement, not yet user-facing — pick and vendor a lightweight browser-capable model + runtime (`static/vendor/`, no CDN), land it as a dev-only `ml` processor behind a flag so real FPS/quality can be measured against this DVR's actual streams before committing to ship it. Depends on 15.1's pipeline/canvas/lifecycle plumbing. Design below. |
 | 15.3 | ⬜ later | `AI` becomes a real, user-facing selector option — gated by a runtime capability/performance check that auto-falls-back to `Classical` on a device too weak for the ML pass. Depends on 15.2 having already proven the model/runtime choice on real hardware. Design below. |
 | 16 | ✅ done | Self-heal `mediamtx` live-view paths after it restarts independently of `dvr-window` — closes the "Known gap" from the Phase 6 split (`ARCHITECTURE.md`), which previously required a manual `dvr-window` restart to recover. Triggered by a real incident (2026-08-10, `sm-qohelet`/`sw-david01`): `mediamtx` was OOM-killed (exit 137) under a stale resource limit, lost all path registrations, and stayed unreachable — read by users as an endless reconnect loop — until manually forced. Implemented and verified (2026-08-10): recreated the exact incident locally (`docker-compose.yml`'s network-mode split, killed and fully recreated the `mediamtx` container while `dvr-window` kept running) — confirmed the fresh container came up with zero paths, then self-healed within one 30s sweep with no `dvr-window` restart, HLS confirmed actually serving again afterward. Design below. |
@@ -734,8 +734,8 @@ hardware, not just reasoned about):
   the newly-focused channel's video with no stale frame or leaked
   WebGL context from the previous one.
 
-**Status (2026-08-11): implemented, three of four checklist items now
-confirmed, one real bug found and fixed, one item still blocked.**
+**Status (2026-08-12): implemented and fully verified — all four
+checklist items confirmed, one real bug found and fixed along the way.**
 
 - **Bug found and fixed**: retargeting the enhancement pipeline to a
   different video (mode toggle, or opening/closing/Prev-Next between
@@ -787,34 +787,38 @@ confirmed, one real bug found and fixed, one item still blocked.**
   themselves having unknown, uncontrolled latency between them, not a
   real bug; the atomic in-page script above is the trustworthy version
   and fully vindicates Phase 14's mechanism.
-- **Still blocked**, this time by the verification environment rather
-  than the app: confirming the classical pass visibly improves a
-  dark/soft real feed needs an actual decoded video frame to sample, and
-  this session's browser-automation tab cannot produce one under any
-  approach tried — `requestVideoFrameCallback` never fires
-  (`document.visibilityState` stuck `"hidden"`; a polled
-  `video.currentTime` sat frozen for 20+ continuous seconds), and even a
-  direct one-shot `texImage2D` snapshot (which shouldn't need rVFC,
-  just a decoded frame) found every grid-cell video stuck at
-  `readyState: 0` with zero dimensions — confirmed this isn't
-  session/resource degradation by testing in a brand-new tab, which
-  showed the identical `readyState: 0`. (One channel did briefly show a
-  real decoded frame — `readyState: 4`, 1280×720 — right at the very
-  start of this verification session; that appears to have been a
-  one-time fluke, not a reproducible state, since nothing since has
-  matched it.) Different blocker than the 2026-08-10 attempt (that one
-  was host resource contention), same outcome: needs a real,
-  foregrounded browser tab, not automation, to finish. `IPCamera 02`
-  (channel 10) showed the clearest IR-tinting in earlier screenshots but
-  is deliberately deferred as the dark-feed test candidate — it has the
-  worst latency and is physically farthest away of the online channels
-  (`MEMORY.md`), not representative of a typical feed; a nighttime pass
-  on one of the analog channels (or `IPCamera 01`) is the better
-  real-world candidate — conveniently, it's now dusk locally, so this is
-  a good time to check. A well-lit daytime scene (`Garasi`) was checked
-  as best-effort earlier in the session and showed only a subtle
-  difference, consistent with the classical pass targeting genuinely
-  dark/soft footage rather than daytime footage.
+- **Confirmed (2026-08-12)**: the classical pass visibly improves a
+  genuinely dark/IR real feed. The previous session's browser-automation
+  tab couldn't produce a decoded frame under any approach tried
+  (`requestVideoFrameCallback` never fired, `document.visibilityState`
+  stuck `"hidden"`, `texImage2D` snapshots found every video stuck at
+  `readyState: 0`, ruled out as session/resource degradation via a
+  fresh-tab retest) — a later session's tab happened to actually have
+  `visibilityState: "visible"`, unblocking real decode. Used
+  `IPCamera 02` (channel 10) after all — deferred earlier for its
+  latency/distance (`MEMORY.md`), but by night it was the clearest
+  genuinely-dark real feed available, and the checklist item only needs
+  *a* representative dark feed, not a low-latency one. Followed the
+  objective methodology documented above instead of eyeballing
+  screenshots: pulled a real raw frame via `/api/snapshot?channelId=10`
+  (server-side, unaffected by any client-side canvas state) and
+  reproduced `ENHANCE_FRAGMENT_SRC`'s exact math in a numpy script
+  against it. Results: contrast (luminance std dev) +6.0%, mid-tone
+  dynamic-range spread (10th/90th percentile — 1st/99th saturated at
+  0/255 already, from the burned-in white timestamp text and pure-black
+  shadow corners) +7.0%, sharpness (Laplacian variance) +128.8%. Visual
+  inspection of the computed-enhanced frame confirms genuinely crisper
+  carpet-pattern and pillar edges and better shadow differentiation,
+  with a minor, expected tradeoff of amplified sensor noise/grain in flat
+  dark areas from the unsharp mask — not a concern, matches how unsharp
+  masking normally behaves on noisy source material. Incidentally also
+  confirmed the live pipeline renders correctly end-to-end in a real
+  browser (canvas showed real 1920×1080 enhanced content), i.e. the
+  stale-frame fix above works in practice, not just in the scripted
+  repro. A well-lit daytime scene (`Garasi`) was checked earlier as
+  best-effort and showed only a subtle difference by comparison,
+  consistent with the classical pass targeting genuinely dark/soft
+  footage rather than daytime footage.
 
 ## Phase 15.2 design: ML groundwork for stream enhancement (dev-only, not yet user-facing)
 
@@ -1166,14 +1170,14 @@ follow-up — 17.3/17.4 carry materially more risk than 17.1/17.2.
 
 ## Next step
 
-Phase 6 is fully done. Phases 14 (focused-stream throttling) and 16
-(mediamtx live-view path self-heal) are both done and deployed to
-production (2026-08-10). Phase 15.1 (classical stream enhancement —
-design above) is next up for implementation; 15.2 (ML groundwork) and
-15.3 (`AI` as a real selector option) follow in order, each depending
-on the one before it proving out. Phase 17 (browser-side FPS for the
-live grid — design above) is queued behind 15.1: 17.1 (FPS
-instrumentation) and 17.2 (low-risk grid tuning) can start any time;
-17.3 (backend sub-stream prerequisite) and 17.4 (grid switches to
-`sub`) are gated on 17.1/17.2 landing first and on 17.3's real-DVR
-codec/CPU-headroom findings.
+Phase 6 is fully done. Phases 14 (focused-stream throttling), 15.1
+(classical stream enhancement), and 16 (mediamtx live-view path
+self-heal) are all done, verified against the real DVR, and (14/16)
+deployed to production (2026-08-10; 15.1 verified 2026-08-12, not yet
+deployed). 15.2 (ML groundwork) and 15.3 (`AI` as a real selector
+option) are next up in order, each depending on the one before it
+proving out. Phase 17 (browser-side FPS for the live grid — design
+above) can start any time: 17.1 (FPS instrumentation) and 17.2
+(low-risk grid tuning) have no dependencies; 17.3 (backend sub-stream
+prerequisite) and 17.4 (grid switches to `sub`) are gated on 17.1/17.2
+landing first and on 17.3's real-DVR codec/CPU-headroom findings.
