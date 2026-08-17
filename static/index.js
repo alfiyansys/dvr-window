@@ -153,8 +153,37 @@ function toggleFullscreen() {
   }
 }
 
+// Fullscreen-only bottom bar (see index.css) is hidden by default and
+// only shown while the mouse is moving (or right after a touch),
+// auto-hiding again after a short idle period - same interaction model
+// as YouTube's own fullscreen control bar. Toggling this class outside
+// fullscreen is harmless: the CSS gates all of its effect behind the
+// `:fullscreen` pseudo-class, so it's simplest to just let the
+// mousemove/touchstart listeners below run unconditionally rather than
+// tracking fullscreen state twice.
+const CONTROLS_HIDE_MS = 2500;
+let controlsHideTimer = null;
+
+function showFullscreenControls() {
+  const box = document.querySelector('.overlay-box');
+  box.classList.add('show-controls');
+  clearTimeout(controlsHideTimer);
+  controlsHideTimer = setTimeout(() => box.classList.remove('show-controls'), CONTROLS_HIDE_MS);
+}
+
+document.querySelector('.overlay-box').addEventListener('mousemove', showFullscreenControls);
+document.querySelector('.overlay-box').addEventListener('touchstart', showFullscreenControls, { passive: true });
+
 function updateFullscreenButton() {
   document.getElementById('overlayFullscreen').textContent = isFullscreen() ? 'Exit Fullscreen ⛶' : 'Fullscreen ⛶';
+  if (isFullscreen()) {
+    // Start visible on entry rather than making the user jiggle the
+    // mouse first to discover the bar exists at all.
+    showFullscreenControls();
+  } else {
+    clearTimeout(controlsHideTimer);
+    document.querySelector('.overlay-box').classList.remove('show-controls');
+  }
 }
 document.addEventListener('fullscreenchange', updateFullscreenButton);
 document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
