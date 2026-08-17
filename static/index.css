@@ -46,10 +46,183 @@
 .overlay-box:fullscreen, .overlay-box:-webkit-full-screen {
   max-width: 100%; max-height: 100%; width: 100%; height: 100%;
   border: none; border-radius: 0;
+  /* The bottom bar below is absolutely positioned and slides via
+     `transform: translateY()` between its hidden/shown states - while
+     hidden that transform nudges it a few px past the box's own
+     bottom edge, and the base `.overlay-box` rule's overflow-y:auto
+     (meant for the non-fullscreen modal's scrollable content) would
+     otherwise treat those few px as real overflow and draw a
+     scrollbar for it. Nothing in fullscreen ever needs the box itself
+     to scroll - the video fills it and the bar overlays on top - so
+     just turn scrolling off here instead of tuning the transform
+     distance to avoid the artifact. */
+  overflow: hidden;
 }
 .overlay-box:fullscreen video, .overlay-box:-webkit-full-screen video,
 .overlay-box:fullscreen canvas#enhanceCanvas, .overlay-box:-webkit-full-screen canvas#enhanceCanvas {
   max-height: 100%;
+}
+
+/* Live-view fullscreen: the right-hand sidebar becomes a single-line,
+   semi-transparent bottom bar instead of a permanent stripe down the
+   side, so the video itself actually gets the whole screen. Hidden by
+   default (opacity/pointer-events), shown only while the mouse is
+   moving - index.js toggles `.show-controls` on .overlay-box on
+   mousemove/touchstart and lets it auto-hide again after a short idle
+   period (same interaction model as YouTube's own fullscreen control
+   bar). `:focus-within` is a pure-CSS fallback so Tab-ing into a
+   button here (keyboard-only use) never leaves the bar stranded
+   invisible. `position:relative` on the box gives the bar something to
+   anchor `position:absolute` against. */
+.overlay-box:fullscreen,
+.overlay-box:-webkit-full-screen {
+  position: relative;
+}
+.overlay-box:fullscreen .overlay-side,
+.overlay-box:-webkit-full-screen .overlay-side {
+  position: absolute;
+  left: 0; right: 0; bottom: 0; top: auto;
+  width: auto;
+  /* Fixed, not auto - a flex row's auto height tracks its tallest
+     child, and the 44px PTZ pad buttons are taller than the
+     action/label content, so height:auto made the whole bar visibly
+     grow only on channels with PTZ. A fixed height plus
+     align-items:center keeps the bar the same size either way; 44px
+     PTZ buttons + 10px padding top/bottom fit exactly, and shorter
+     content (no-PTZ channels) just centers within the same box. */
+  height: 64px;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 16px;
+  padding: 10px 20px;
+  border-left: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(10, 10, 10, 0.6);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  /* One line, always - overflow scrolls horizontally rather than
+     wrapping to a second row on a narrow/short fullscreen window. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  pointer-events: none;
+  z-index: 2;
+}
+.overlay-box.show-controls:fullscreen .overlay-side,
+.overlay-box.show-controls:-webkit-full-screen .overlay-side,
+.overlay-box:fullscreen:focus-within .overlay-side,
+.overlay-box:-webkit-full-screen:focus-within .overlay-side {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+/* Selectors below are prefixed with `.overlay-side` (not just
+   `.overlay-box:fullscreen`) so their specificity strictly exceeds the
+   `.overlay-side .label .actions { flex-direction: column }` rule in
+   the min-width:700px block further down - same specificity (3
+   classes each) would otherwise tie and fall back to source order,
+   which is a trap: that rule sits later in the file and would win,
+   silently stacking the actions back into a column on any normal
+   desktop-width fullscreen. Confirmed this the hard way - an earlier
+   version of this block used the lower-specificity selector and the
+   bar rendered as several stacked rows instead of one line. */
+/* `.label` itself becomes an unboxed pass-through (`display:contents`)
+   so its two children - the name/latency/status cluster and the
+   action buttons - become direct flex items of `.overlay-side`
+   alongside #ptzPad/#ptzZoom, instead of being confined to their own
+   sub-row inside `.label`'s box. That's what lets the identity
+   cluster below get pushed all the way to the bar's right edge
+   (order + margin-left:auto) independently of where the actions/PTZ
+   land, rather than just to the right edge of `.label`'s own space. */
+.overlay-box:fullscreen .overlay-side .label, .overlay-box:-webkit-full-screen .overlay-side .label {
+  display: contents;
+}
+.overlay-box:fullscreen .overlay-side .actions, .overlay-box:-webkit-full-screen .overlay-side .actions {
+  order: 1;
+  flex-direction: row;
+  align-items: center;
+  padding: 0;
+  gap: 12px;
+  flex-shrink: 0;
+}
+/* Identity cluster: pinned to the bar's right edge (order last among
+   .overlay-side's flex children + margin-left:auto, which absorbs all
+   remaining row space and pushes everything after it - here just this
+   cluster - flush right), with the name/latency/status children
+   reordered to read name -> latency -> status left to right, and the
+   name right-aligned within its own box so a short name still sits
+   snug against latency/status rather than floating with extra gap. */
+.overlay-box:fullscreen .overlay-side .overlay-title, .overlay-box:-webkit-full-screen .overlay-side .overlay-title {
+  order: 4;
+  margin-left: auto;
+  flex-direction: row;
+  align-items: center;
+  padding: 0;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.overlay-box:fullscreen .overlay-side .overlay-title #overlayName, .overlay-box:-webkit-full-screen .overlay-side .overlay-title #overlayName {
+  order: 1;
+  text-align: right;
+}
+.overlay-box:fullscreen .overlay-side .overlay-title #overlayPing, .overlay-box:-webkit-full-screen .overlay-side .overlay-title #overlayPing {
+  order: 2;
+}
+.overlay-box:fullscreen .overlay-side .overlay-title #overlayStatus, .overlay-box:-webkit-full-screen .overlay-side .overlay-title #overlayStatus {
+  order: 3;
+}
+.overlay-box:fullscreen .overlay-side .actions-pager, .overlay-box:-webkit-full-screen .overlay-side .actions-pager,
+.overlay-box:fullscreen .overlay-side .actions-pager button, .overlay-box:-webkit-full-screen .overlay-side .actions-pager button {
+  flex: none;
+}
+/* PTZ collapses from the 3x3 +-shaped pad into one inline row of arrow
+   buttons (the pad's blank filler grid-cells just get hidden) so it
+   fits the single-line bar instead of stacking a second row under it.
+   Selector requires `.open` too - openOverlay() only adds that class
+   when the channel actually has ptzEnabled (analog channels don't),
+   and `#ptzPad` alone (no `.open` required) would otherwise force
+   `display:flex` unconditionally by ID specificity, showing the PTZ
+   row for every channel regardless of hardware support. */
+.overlay-box:fullscreen #ptzPad.open, .overlay-box:-webkit-full-screen #ptzPad.open {
+  display: flex;
+  order: 2;
+  flex-direction: row;
+  gap: 6px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.overlay-box:fullscreen #ptzPad span, .overlay-box:-webkit-full-screen #ptzPad span {
+  display: none;
+}
+.overlay-box:fullscreen #ptzPad button[data-pan="-50"], .overlay-box:-webkit-full-screen #ptzPad button[data-pan="-50"] { order: 1; }
+.overlay-box:fullscreen #ptzPad button[data-tilt="50"], .overlay-box:-webkit-full-screen #ptzPad button[data-tilt="50"] { order: 2; }
+.overlay-box:fullscreen #ptzPad button[data-tilt="-50"], .overlay-box:-webkit-full-screen #ptzPad button[data-tilt="-50"] { order: 3; }
+.overlay-box:fullscreen #ptzPad button[data-pan="50"], .overlay-box:-webkit-full-screen #ptzPad button[data-pan="50"] { order: 4; }
+/* Grid layout (the 3x3 pad) sized these buttons via the 36px grid
+   cells in the base `.ptz` rule - switching #ptzPad to flex above
+   drops that sizing, so the buttons would otherwise shrink to their
+   bare glyph size (zero padding, per the base `.ptz button` rule).
+   Zoom's buttons keep their own rule below instead of sharing this one
+   because they carry text labels ("Zoom +"/"Zoom −"), not a single
+   glyph - a fixed square would clip that text. */
+.overlay-box:fullscreen #ptzPad button, .overlay-box:-webkit-full-screen #ptzPad button {
+  width: 44px;
+  height: 44px;
+  font-size: 22px;
+}
+.overlay-box:fullscreen #ptzZoom, .overlay-box:-webkit-full-screen #ptzZoom {
+  order: 3;
+  padding: 0;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.overlay-box:fullscreen #ptzZoom button, .overlay-box:-webkit-full-screen #ptzZoom button {
+  padding: 10px 16px;
+  font-size: 16px;
 }
 
 .ptz { display: none; grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); gap: 4px; padding: 10px 12px; justify-content: center; }
