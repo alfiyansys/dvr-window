@@ -374,7 +374,22 @@ document.getElementById('jumpBtn').onclick = jumpToTime;
 document.getElementById('stopBtn').onclick = stopCurrent;
 document.getElementById('downloadBtn').onclick = downloadClip;
 document.getElementById('timeline').onclick = seekTimeline;
-document.getElementById('date').valueAsDate = new Date();
+
+// Pre-fill the date picker with today and "jump to time" with now, rounded
+// down to the minute. Both are built from the local-time getters, never
+// `valueAsDate`/`toISOString()`: those go through UTC, so between midnight
+// and the UTC offset (07:00 in WIB) they'd hand the DVR yesterday's date.
+// Local wall-clock digits are also exactly what these fields must hold —
+// search() and jumpToTime() suffix them with "Z", and the DVR's "UTC"
+// timestamps are really its own local digits (see fmtTime's note above).
+(() => {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  document.getElementById('date').value = today;
+  document.getElementById('jumpDatetime').value =
+    `${today}T${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+})();
 
 // One listener for the video element's whole lifetime — it's never
 // recreated, only hls.attachMedia()/destroy() cycles around it (see
