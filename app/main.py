@@ -381,11 +381,20 @@ def stop_playback(req: PlaybackStopRequest):
 
 
 @app.get("/api/snapshot")
-def get_snapshot(channelId: int):
+def get_snapshot(channelId: int | None = None, name: str | None = None):
     # Not ISAPI's own /picture endpoint — see MediaBridge.capture_frame for
     # why (fixed 704x576 capture on this firmware, wrong aspect ratio).
+    #
+    # `name` lets the playback view snapshot the exact mediamtx path it's
+    # already streaming (its pb_ch{id}_{uuid} playback path, handed back by
+    # start_playback) — capture_frame just reads whatever path name it's
+    # given over the RTSP re-serve, live or playback alike. Without it,
+    # channelId falls back to the live main-stream path, as before.
+    if name is None:
+        if channelId is None:
+            raise HTTPException(status_code=400, detail="channelId or name is required")
+        name = stream_path_name(channelId, str(_main_track_id(channelId)))
     bridge: MediaBridge = app.state.bridge
-    name = stream_path_name(channelId, str(_main_track_id(channelId)))
     output_path = SNAPSHOT_DIR / f"{name}_{uuid.uuid4().hex[:8]}.jpg"
     try:
         bridge.capture_frame(name, output_path)

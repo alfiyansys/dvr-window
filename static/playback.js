@@ -369,10 +369,26 @@ async function downloadClip() {
   }
 }
 
+async function takeSnapshot() {
+  if (!currentPlaybackName) return;
+  // Snapshot the exact playback path currently streaming (not the live
+  // main stream) — see /api/snapshot's `name` param in main.py.
+  const res = await authFetch(`/api/snapshot?name=${encodeURIComponent(currentPlaybackName)}`);
+  if (!res.ok) return;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `snapshot_ch${currentChannelId}_${Date.now()}.jpg`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 document.getElementById('searchBtn').onclick = search;
 document.getElementById('jumpBtn').onclick = jumpToTime;
 document.getElementById('stopBtn').onclick = stopCurrent;
 document.getElementById('downloadBtn').onclick = downloadClip;
+document.getElementById('snapshotBtn').onclick = takeSnapshot;
 document.getElementById('timeline').onclick = seekTimeline;
 
 // Pre-fill the date picker with today and "jump to time" with now, rounded
