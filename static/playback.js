@@ -414,4 +414,7 @@ document.getElementById('timeline').onclick = seekTimeline;
 // session. Reads currentSeg/loadedDate fresh each time it fires.
 document.getElementById('video').addEventListener('timeupdate', updateMarker);
 
-ensureAuthKey().then(loadChannels);
+// Auto-run a search for today (the date field is already pre-filled by the
+// IIFE above) once channels are loaded, so segments/timeline show up
+// without requiring a manual "Search recordings" click.
+ensureAuthKey().then(loadChannels).then(search);
